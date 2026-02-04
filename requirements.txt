@@ -1,0 +1,7 @@
+MetaTrader5
+torch
+pandas
+numpy
+pandas_ta
+tqdm
+schedule
