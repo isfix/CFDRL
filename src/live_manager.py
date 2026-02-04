@@ -79,10 +79,10 @@ def update_market_state():
 def get_signal(symbol):
     """
     Prepares data and asks the AI for a decision.
-    Returns: Action (0, 1, 2)
+    Returns: Tuple(Action, DataFrame)
     """
     if symbol not in active_models or symbol not in market_state:
-        return 0 # Hold defaults
+        return 0, None # Hold defaults
         
     df = market_state[symbol]
     
@@ -91,7 +91,7 @@ def get_signal(symbol):
     
     if len(df_features) < Settings.SEQUENCE_LENGTH:
         logger.warning(f"Not enough data for {symbol} inference.")
-        return 0
+        return 0, df_features
         
     # Get the last sequence
     # input shape: (1, seq_len, input_dim)
@@ -102,9 +102,9 @@ def get_signal(symbol):
         q_values = active_models[symbol](seq_tensor)
         action = torch.argmax(q_values).item()
         
-    return action
+    return action, df_features
 
-def execute_trade(symbol, signal):
+def execute_trade(symbol, signal, df_features=None):
     """
     Executes trade logic based on signal and current position.
     Signal: 0=Hold, 1=Buy, 2=Sell
@@ -165,8 +165,12 @@ def execute_trade(symbol, signal):
     # Let's stick to the simplest valid logic.
     
     # Fetch/Calc ATR
-    # (Re-running prepare_features is slightly redundant but safe)
-    df_feat = data_factory.prepare_features(df)
+    # Use passed features if available to avoid redundant calculation
+    if df_features is not None and not df_features.empty:
+        df_feat = df_features
+    else:
+        df_feat = data_factory.prepare_features(df)
+
     if df_feat.empty: return
     last_row = df_feat.iloc[-1]
     last_volatility = last_row['volatility'] # ATR/Close
@@ -283,7 +287,7 @@ if __name__ == "__main__":
                 update_market_state()
                 
                 for symbol in Settings.PAIRS:
-                    sig = get_signal(symbol)
+                    sig, df_features = get_signal(symbol)
                     
                     # Convert int signal to string for log
                     sig_str = "HOLD"
@@ -293,10 +297,12 @@ if __name__ == "__main__":
                     if sig != 0:
                         logger.info(f"{symbol} Signal: {sig_str}")
                         
-                    execute_trade(symbol, sig)
+                    execute_trade(symbol, sig, df_features=df_features)
                 
                 # Sleep enough to avoid duplicate triggers for this same candle minute
-                time.sleep(60) 
+                # We just need to wait until we are past the 2-second window
+                while datetime.now().second < 2:
+                    time.sleep(0.5)
                 
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
