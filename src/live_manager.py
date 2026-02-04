@@ -64,10 +64,10 @@ def update_market_state():
         current_df = market_state[symbol]
         
         # Merge and Remove duplicates based on index (Time)
-        # Combine
-        combined = pd.concat([current_df, new_data])
-        # Remove duplicates, keeping the last one (latest data)
-        combined = combined[~combined.index.duplicated(keep='last')]
+        # Efficiency: Check index of new data against current data before concatenating
+        # Remove rows from current_df that are in new_data (to be updated)
+        mask = ~current_df.index.isin(new_data.index)
+        combined = pd.concat([current_df[mask], new_data])
         
         # Keep window size reasonable (don't let it grow effectively infinite)
         # We need at least INIT_DATA_BARS
