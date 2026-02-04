@@ -5,3 +5,5 @@ numpy
 pandas_ta
 tqdm
 schedule
+setuptools
+wheel

@@ -29,3 +29,8 @@ ENV/
 data/
 models/
 *.log
+julessuggestion.md
+blueprint.md
+flowchart.md
+instruction.md
+someflaw.md
