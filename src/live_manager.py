@@ -300,7 +300,9 @@ if __name__ == "__main__":
                     execute_trade(symbol, sig, df_features=df_features)
                 
                 # Sleep enough to avoid duplicate triggers for this same candle minute
-                time.sleep(60) 
+                # We just need to wait until we are past the 2-second window
+                while datetime.now().second < 2:
+                    time.sleep(0.5)
                 
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
