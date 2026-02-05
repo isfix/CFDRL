@@ -47,34 +47,42 @@ def init_market_state():
         else:
             logger.error(f"Failed to fetch init data for {symbol}")
 
+from concurrent.futures import ThreadPoolExecutor
+
 def update_market_state():
     """
     Efficiency Hack: Only fetch last few bars and append to state.
     """
-    for symbol in Settings.PAIRS:
-        if symbol not in market_state:
-            continue
-            
-        # Fetch last 2 bars (Current open candle + last closed candle)
-        # We really only need the latest closed candle to update our history
-        new_data = data_factory.fetch_data(symbol, 2)
-        if new_data.empty:
-            continue
-            
-        current_df = market_state[symbol]
-        
-        # Merge and Remove duplicates based on index (Time)
-        # Efficiency: Check index of new data against current data before concatenating
-        # Remove rows from current_df that are in new_data (to be updated)
-        mask = ~current_df.index.isin(new_data.index)
-        combined = pd.concat([current_df[mask], new_data])
-        
-        # Keep window size reasonable (don't let it grow effectively infinite)
-        # We need at least INIT_DATA_BARS
-        if len(combined) > Settings.INIT_DATA_BARS + 50:
-            combined = combined.iloc[-Settings.INIT_DATA_BARS:]
-            
-        market_state[symbol] = combined
+    def process_symbol(symbol):
+        try:
+            if symbol not in market_state:
+                return
+
+            # Fetch last 2 bars (Current open candle + last closed candle)
+            # We really only need the latest closed candle to update our history
+            new_data = data_factory.fetch_data(symbol, 2)
+            if new_data.empty:
+                return
+
+            current_df = market_state[symbol]
+
+            # Merge and Remove duplicates based on index (Time)
+            # Efficiency: Check index of new data against current data before concatenating
+            # Remove rows from current_df that are in new_data (to be updated)
+            mask = ~current_df.index.isin(new_data.index)
+            combined = pd.concat([current_df[mask], new_data])
+
+            # Keep window size reasonable (don't let it grow effectively infinite)
+            # We need at least INIT_DATA_BARS
+            if len(combined) > Settings.INIT_DATA_BARS + 50:
+                combined = combined.iloc[-Settings.INIT_DATA_BARS:]
+
+            market_state[symbol] = combined
+        except Exception as e:
+            logger.error(f"Error updating state for {symbol}: {e}")
+
+    with ThreadPoolExecutor() as executor:
+        executor.map(process_symbol, Settings.PAIRS)
 
 def get_signal(symbol):
     """
