@@ -4,9 +4,9 @@ import MetaTrader5 as mt5
 class Settings:
     # --- MT5 Connection ---
     # (Fill these with your actual credentials)
-    MT5_LOGIN = 10009507592
-    MT5_PASSWORD = "Oi*uIk7l"
-    MT5_SERVER = "MetaQuotes-Demo"
+    MT5_LOGIN = id
+    MT5_PASSWORD = "password"
+    MT5_SERVER = "Server-Example"
     MT5_PATH = "C:\\Program Files\\MetaTrader 5\\terminal64.exe" # Adjust path if needed
 
     # --- TRADING PAIRS ---
