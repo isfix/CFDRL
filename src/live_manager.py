@@ -4,11 +4,16 @@ import torch
 import pandas as pd
 import time
 from datetime import datetime
+import os
+import sys
+
+# Add parent directory to path so we can import config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from config import Settings
 from src import data_factory
 from src.brain import QNetwork
 from src.utils import logger
-import os
 
 # --- Global State ---
 active_models = {}  # {symbol: model_instance}
