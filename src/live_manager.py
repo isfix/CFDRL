@@ -9,6 +9,7 @@ from src import data_factory
 from src.brain import QNetwork
 from src.utils import logger
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 # --- Global State ---
 active_models = {}  # {symbol: model_instance}
@@ -46,8 +47,6 @@ def init_market_state():
             logger.info(f"Initialized state for {symbol} with {len(df)} bars")
         else:
             logger.error(f"Failed to fetch init data for {symbol}")
-
-from concurrent.futures import ThreadPoolExecutor
 
 def update_market_state():
     """
@@ -245,6 +244,26 @@ def execute_trade(symbol, signal, df_features=None):
 
     # Signal 0 (HOLD) - Do nothing.
 
+def process_pair(symbol):
+    """
+    Orchestrates signal generation and trade execution for a single pair.
+    Designed to be run in parallel.
+    """
+    try:
+        sig, df_features = get_signal(symbol)
+
+        # Convert int signal to string for log
+        sig_str = "HOLD"
+        if sig == 1: sig_str = "BUY"
+        elif sig == 2: sig_str = "SELL"
+
+        if sig != 0:
+            logger.info(f"{symbol} Signal: {sig_str}")
+
+        execute_trade(symbol, sig, df_features=df_features)
+    except Exception as e:
+        logger.error(f"Error processing {symbol}: {e}")
+
 def close_position(position, symbol):
     tick = mt5.symbol_info_tick(symbol)
     request = {
@@ -294,18 +313,9 @@ if __name__ == "__main__":
                 logger.info(f"New Candle Detected: {now.strftime('%H:%M:%S')}")
                 update_market_state()
                 
-                for symbol in Settings.PAIRS:
-                    sig, df_features = get_signal(symbol)
-                    
-                    # Convert int signal to string for log
-                    sig_str = "HOLD"
-                    if sig == 1: sig_str = "BUY"
-                    elif sig == 2: sig_str = "SELL"
-                    
-                    if sig != 0:
-                        logger.info(f"{symbol} Signal: {sig_str}")
-                        
-                    execute_trade(symbol, sig, df_features=df_features)
+                # Parallelize signal generation and trade execution
+                with ThreadPoolExecutor() as executor:
+                    list(executor.map(process_pair, Settings.PAIRS))
                 
                 # Sleep enough to avoid duplicate triggers for this same candle minute
                 # We just need to wait until we are past the 2-second window
