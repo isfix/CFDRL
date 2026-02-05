@@ -289,8 +289,14 @@ def close_position(position, symbol):
 
 # --- Main Daemon ---
 if __name__ == "__main__":
-    if not mt5.initialize():
-        logger.error("MT5 init failed")
+    if not mt5.initialize(
+        path=Settings.MT5_PATH,
+        login=Settings.MT5_LOGIN,
+        password=Settings.MT5_PASSWORD,
+        server=Settings.MT5_SERVER
+    ):
+        logger.error(f"MT5 init failed. Path: {Settings.MT5_PATH}")
+        logger.error(f"Error: {mt5.last_error()}")
         exit()
         
     logger.info("Starting Multi-Pair Bot...")

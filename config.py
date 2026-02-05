@@ -4,9 +4,9 @@ import MetaTrader5 as mt5
 class Settings:
     # --- MT5 Connection ---
     # (Fill these with your actual credentials)
-    MT5_LOGIN = 12345678
-    MT5_PASSWORD = "your_password"
-    MT5_SERVER = "Your_Broker_Server"
+    MT5_LOGIN = 10009507592
+    MT5_PASSWORD = "Oi*uIk7l"
+    MT5_SERVER = "MetaQuotes-Demo"
     MT5_PATH = "C:\\Program Files\\MetaTrader 5\\terminal64.exe" # Adjust path if needed
 
     # --- TRADING PAIRS ---
@@ -40,7 +40,9 @@ class Settings:
     REPLAY_MEMORY_SIZE = 10000 # How many experiences to store for training
 
     # --- DATA PARAMETERS ---
-    TRAIN_DATA_BARS = 50000 # Number of bars to download for training
+    TRAIN_DATA_BARS = 450000 # Increased for Deep Learning
+    TRAIN_SPLIT_INDEX = 420000 # First 420k for training
+    TEST_SPLIT_INDEX = 420000 # Remaining for testing (420k to end)
     INIT_DATA_BARS = 200    # Number of bars to fetch on bot startup
 
     # --- RISK MANAGEMENT ---

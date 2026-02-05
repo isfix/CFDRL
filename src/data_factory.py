@@ -9,22 +9,72 @@ from src.utils import logger
 def fetch_data(symbol: str, num_bars: int) -> pd.DataFrame:
     """
     Fetches historical M5 data for a given symbol from MT5.
+    Uses chunked fetching to maximize retrieval within terminal limits.
     """
     # Ensure connection
-    if not mt5.initialize():
-        logger.error(f"MT5 initialization failed in fetch_data. Error: {mt5.last_error()}")
+    if not mt5.initialize(path=Settings.MT5_PATH, login=Settings.MT5_LOGIN, password=Settings.MT5_PASSWORD, server=Settings.MT5_SERVER):
+        logger.error(f"MT5 initialization failed in fetch_data. Path: {Settings.MT5_PATH}")
+        logger.error(f"Error: {mt5.last_error()}")
         return pd.DataFrame()
 
-    rates = mt5.copy_rates_from_pos(symbol, Settings.TIMEFRAME, 0, num_bars)
+    # Check terminal limit
+    terminal_info = mt5.terminal_info()
+    max_bars = terminal_info.maxbars if terminal_info else 0
+    if num_bars > max_bars:
+        logger.warning(f"Requested {num_bars} bars, but terminal 'Max bars in chart' is {max_bars}.")
+        logger.warning("You may need to increase this setting in MT5 (Tools > Options > Charts).")
     
-    if rates is None:
-        logger.error(f"Failed to fetch data for {symbol} (Error: {mt5.last_error()})")
+    # Chunked Fetch Strategy (Backwards)
+    all_rates = []
+    total_fetched = 0
+    
+    # Start from "now" + buffer (to ensure we get the latest candle)
+    # Actually, copy_rates_range 'date_to' is exclusive usually.
+    from datetime import datetime, timedelta
+    current_date = datetime.now() + timedelta(minutes=Settings.TIMEFRAME * 2) 
+    
+    # 30 day chunks
+    chunk_size_days = 30
+    
+    logger.info(f"Fetching approximately {num_bars} bars for {symbol}...")
+    
+    while total_fetched < num_bars:
+        start_date = current_date - timedelta(days=chunk_size_days)
+        
+        rates = mt5.copy_rates_range(symbol, Settings.TIMEFRAME, start_date, current_date)
+        
+        if rates is None or len(rates) == 0:
+            logger.warning(f"No data received between {start_date} and {current_date}. Stopping fetch.")
+            break
+            
+        all_rates.insert(0, rates)
+        total_fetched += len(rates)
+        
+        current_date = start_date
+        
+        # Safety break if we are getting very few bars (end of history)
+        if len(rates) < 10: 
+            break
+            
+    if not all_rates:
+        logger.error(f"Failed to fetch data for {symbol}.")
         return pd.DataFrame()
+        
+    rates = np.concatenate(all_rates)
+    
+    # Truncate if we got too many (from the start/oldest)
+    if len(rates) > num_bars:
+         rates = rates[-num_bars:]
+         
+    logger.info(f"Successfully fetched {len(rates)} bars for {symbol}.")
     
     # Convert to DataFrame
     df = pd.DataFrame(rates)
     df['time'] = pd.to_datetime(df['time'], unit='s')
     df.set_index('time', inplace=True)
+    
+    # Remove duplicates just in case
+    df = df[~df.index.duplicated(keep='last')]
     
     return df
 
