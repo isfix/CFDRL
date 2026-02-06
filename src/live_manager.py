@@ -213,7 +213,7 @@ def execute_trade(symbol, signal, df_features=None):
         "magic": magic,
         "comment": "AI Bot",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": mt5.ORDER_FILLING_FOK,
     }
 
     if signal == 1: # BUY
@@ -222,9 +222,10 @@ def execute_trade(symbol, signal, df_features=None):
             close_position(current_pos, symbol)
             # Then open Buy? Or wait next candle? 
             # Strategy says "Opposes current position: Close". It implies flip or just close.
-            # Let's simple Close for now.
+            # Let's simple Close then Open logic below.
             logger.info(f"{symbol}: Signal BUY. Closed existing SELL.")
-            return 
+            # return  <-- REMOVED to allow immediate flip
+            current_pos = None # Reset so it enters the next block 
             
         # If no position, Open BUY
         if not current_pos:
@@ -243,7 +244,8 @@ def execute_trade(symbol, signal, df_features=None):
         if pos_type == 0:
             close_position(current_pos, symbol)
             logger.info(f"{symbol}: Signal SELL. Closed existing BUY.")
-            return
+            # return <-- REMOVED
+            current_pos = None
             
         # If no position, Open SELL
         if not current_pos:
@@ -292,7 +294,7 @@ def close_position(position, symbol):
         "magic": position.magic,
         "comment": "AI Close",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_filling": mt5.ORDER_FILLING_FOK,
     }
     mt5.order_send(request)
 

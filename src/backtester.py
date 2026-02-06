@@ -81,15 +81,12 @@ class Backtester:
             
         print(f"Splitting Data. Training (Ignored): 0-{test_start_idx}. Testing: {test_start_idx}-{len(df)}")
         
+        # 3. Feature Engineering BEFORE Split (Fix Data Leakage)
+        # We calculate indicators on the full history to ensure valid values at the split point.
+        df = data_factory.prepare_features(df)
+        
         # Slice the DataFrame
         df_test = df.iloc[test_start_idx:].copy()
-        
-        # 3. Feature Engineering on Test Set
-        # We do this on the sliced data. 
-        # Note: Indicators like EMA need initial data to converge. 
-        # The first ~50 bars of df_test will have NaN indicators and be dropped by prepare_features.
-        # This acts as a natural "Warmup".
-        df_test = data_factory.prepare_features(df_test)
         
         # Need at least SEQ_LEN bars
         if len(df_test) < Settings.SEQUENCE_LENGTH:
@@ -156,11 +153,11 @@ class Backtester:
                      # But I need to ensure they are available here.
                      # Let's assume they are in df_test.
                      try:
-                         # We can access via row index 't' if df_test aligns with range via offset
-                         # time_idx is the index.
-                         bb_u = df_test.loc[time_idx, 'BBU_20_2.0']
-                         bb_l = df_test.loc[time_idx, 'BBL_20_2.0']
-                         curr_close = df_test.loc[time_idx, 'close']
+                         # Use t-1 (Last Closed Candle) for Filters to avoid Look-Ahead
+                         prev_idx = df_test.index[t-1]
+                         bb_u = df_test.loc[prev_idx, 'BBU_20_2.0']
+                         bb_l = df_test.loc[prev_idx, 'BBL_20_2.0']
+                         curr_close = df_test.loc[prev_idx, 'close']
                          
                          width = bb_u - bb_l
                          vol_pct = width / curr_close
@@ -169,12 +166,14 @@ class Backtester:
                      except KeyError:
                          pass # Columns not found, skip filter
             
-            # --- Execution Logic (at t+1 Open) ---
-            next_open = opens[t+1]
-            next_high = highs[t+1]
-            next_low = lows[t+1]
-            next_time = times[t+1]
-            atr = atrs[t]
+            # --- Execution Logic (at t Open) ---
+            # Decision made using data up to t-1 (Close). 
+            # We execute at the Open of t (Start of current candle).
+            next_open = opens[t]
+            next_high = highs[t]
+            next_low = lows[t]
+            next_time = times[t]
+            atr = atrs[t-1] # Use ATR of last closed candle
             
             # Check Exits first (Stop Loss / Time / Breakeven)
             if position != 0:
