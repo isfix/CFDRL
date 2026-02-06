@@ -8,3 +8,5 @@ schedule
 setuptools
 wheel
 matplotlib
+optuna
+pytz

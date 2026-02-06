@@ -36,3 +36,7 @@ instruction.md
 someflaw.md
 config.py
 config.py
+
+# Data
+*.csv
+tests/data/

@@ -190,6 +190,7 @@ class Trainer:
         torch.save(policy_net.state_dict(), model_path)
         logger.info(f"Model saved to {model_path}")
 
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Deep RL Trainer")
     parser.add_argument("--pair", type=str, required=True, help="Symbol to train (e.g., EURUSD)")
     args = parser.parse_args()
