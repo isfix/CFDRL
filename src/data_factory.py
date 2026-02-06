@@ -108,6 +108,7 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     # Bollinger Bands (Step 3: Squeeze Filter)
     # Appends BBL_20_2.0, BBM_20_2.0, BBU_20_2.0
     bb = ta.bbands(df['close'], length=20, std=2)
+    bb.columns = ['BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0', 'BBB_20_2.0', 'BBP_20_2.0']
     df = pd.concat([df, bb], axis=1)
 
     # Drop NaNs created by indicators (e.g., EMA need 50 bars)
