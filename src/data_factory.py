@@ -105,6 +105,11 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     # 5. Time Context (Hour scaled 0-1)
     df['hour'] = df.index.hour / 23.0
 
+    # Bollinger Bands (Step 3: Squeeze Filter)
+    # Appends BBL_20_2.0, BBM_20_2.0, BBU_20_2.0
+    bb = ta.bbands(df['close'], length=20, std=2)
+    df = pd.concat([df, bb], axis=1)
+
     # Drop NaNs created by indicators (e.g., EMA need 50 bars)
     df.dropna(inplace=True)
 

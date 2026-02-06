@@ -126,7 +126,8 @@ class Trainer:
                 price_diff = next_price - curr_price
                 
                 # 2. Base Penalty (Holding Cost)
-                reward_tensor = -0.1 * (spread_cost_per_unit * SCALING_FACTOR)
+                base_penalty = -0.1 * (spread_cost_per_unit * SCALING_FACTOR)
+                reward_tensor = torch.full((batch_size,), base_penalty, device=self.device)
                 
                 # Masks
                 is_buy = (action_tensor == 1)

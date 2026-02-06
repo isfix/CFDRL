@@ -135,6 +135,35 @@ class Backtester:
                 # If confidence is weak, Hold
                 if action != 0 and confidence < 0.95:
                      action = 0
+
+                # --- FILTERS (Asset Personality Fix) ---
+                if action != 0: # Only filter if trying to trade
+                     current_time = pd.to_datetime(time_idx) # Ensure datetime
+                     
+                     # 1. TIME FILTER (EURUSD Kill Switch)
+                     # Only trade 08:00 - 17:00
+                     if "USD" in symbol and "XAU" not in symbol:
+                          if current_time.hour < 8 or current_time.hour > 17:
+                               action = 0 # Forced Wait (Asian Session)
+                     
+                     # 2. BOLLINGER SQUEEZE FILTER
+                     # Need to access BB columns. 
+                     # Optimally, we extracted them earlier in run_backtest.
+                     # But I need to ensure they are available here.
+                     # Let's assume they are in df_test.
+                     try:
+                         # We can access via row index 't' if df_test aligns with range via offset
+                         # time_idx is the index.
+                         bb_u = df_test.loc[time_idx, 'BBU_20_2.0']
+                         bb_l = df_test.loc[time_idx, 'BBL_20_2.0']
+                         curr_close = df_test.loc[time_idx, 'close']
+                         
+                         width = bb_u - bb_l
+                         vol_pct = width / curr_close
+                         if vol_pct < 0.0005:
+                              action = 0 # Forced Wait (Squeeze)
+                     except KeyError:
+                         pass # Columns not found, skip filter
             
             # --- Execution Logic (at t+1 Open) ---
             next_open = opens[t+1]
