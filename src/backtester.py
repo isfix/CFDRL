@@ -25,25 +25,29 @@ class Backtester:
         self.win_count = 0
         self.loss_count = 0
         
-        # Costs (Hardcoded as per request or approximated)
-        # Gold Spread ~20 cents. Comm ~$7/lot.
-        # Assuming 0.01 lot size for testing.
+        # Costs (Dynamic from Config)
         self.lot_size = 0.01
-        # Costs (Dynamic based on Symbol)
-        if "USD" in symbol and "XAU" not in symbol:
-             # Forex (EURUSD, GBPUSD)
-             # Standard Lot = 100,000 units. 0.01 Lot = 1,000 units.
-             self.contract_size = 100000 
-             # Costs: Spread (~1 pip = $0.10 for 0.01 lot) + Comm (~$0.07) -> ~$0.17
-             # Simplified: $0.15 total per trade
-             self.spread_cost_per_trade = 0.10 
-             self.comm_per_round_trip = 0.07 
-        else:
-             # Gold (XAUUSD)
-             self.contract_size = 100 # 100 oz
-             self.spread_cost_per_trade = 0.20 
-             self.comm_per_round_trip = 0.07
         
+        if symbol in Settings.PAIR_CONFIGS:
+             profile = Settings.PAIR_CONFIGS[symbol]
+             self.contract_size = profile['contract_size']
+             
+             # Calculate Costs in $
+             # Spread Cost = Spread * Contract * Lot
+             self.spread_cost_per_trade = profile['spread'] * self.contract_size * self.lot_size
+             self.comm_per_round_trip = profile['commission'] * self.contract_size * self.lot_size
+             
+        elif "USD" in symbol and "XAU" not in symbol:
+             # Fallback Forex
+             self.contract_size = 100000
+             self.spread_cost_per_trade = 0.10
+             self.comm_per_round_trip = 0.15
+        else:
+             # Fallback Gold
+             self.contract_size = 100
+             self.spread_cost_per_trade = 0.20
+             self.comm_per_round_trip = 0.07
+             
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     def load_model(self):
@@ -350,7 +354,7 @@ def run_backtest(symbol):
             
             if trade_closed:
                 # Calc PnL
-                raw_pnl = (exit_price - entry_price) * 100 * 0.01 if position == 1 else (entry_price - exit_price) * 100 * 0.01
+                raw_pnl = (exit_price - entry_price) * tester.contract_size * tester.lot_size if position == 1 else (entry_price - exit_price) * tester.contract_size * tester.lot_size
                 # Deduct Costs
                 net_pnl = raw_pnl - tester.spread_cost_per_trade - tester.comm_per_round_trip
                 
@@ -365,7 +369,7 @@ def run_backtest(symbol):
                 if position == -1: # Reverse Short -> Long
                     # Close Short
                     exit_price = next_open
-                    raw_pnl = (entry_price - exit_price) * 100 * 0.01
+                    raw_pnl = (entry_price - exit_price) * tester.contract_size * tester.lot_size
                     net_pnl = raw_pnl - tester.spread_cost_per_trade - tester.comm_per_round_trip
                     tester.balance += net_pnl
                     trades.append(net_pnl)
@@ -384,7 +388,7 @@ def run_backtest(symbol):
                 if position == 1: # Reverse Long -> Short
                     # Close Long
                     exit_price = next_open
-                    raw_pnl = (exit_price - entry_price) * 100 * 0.01
+                    raw_pnl = (exit_price - entry_price) * tester.contract_size * tester.lot_size
                     net_pnl = raw_pnl - tester.spread_cost_per_trade - tester.comm_per_round_trip
                     tester.balance += net_pnl
                     trades.append(net_pnl)
@@ -413,5 +417,10 @@ if __name__ == "__main__":
          print("MT5 Init Failed")
          exit()
          
-    # Run for XAUUSD as default
-    run_backtest("XAUUSD")
+    # Interactive Mode
+    user_symbol = input(f"Enter symbol to backtest (Available: {Settings.PAIRS}, Default: XAUUSD): ").strip().upper()
+    
+    if not user_symbol:
+        user_symbol = "XAUUSD"
+        
+    run_backtest(user_symbol)

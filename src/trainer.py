@@ -9,6 +9,7 @@ import torch.nn as nn
 import numpy as np
 import MetaTrader5 as mt5
 from tqdm import tqdm
+import argparse
 from config import Settings
 from src import data_factory
 from src.brain import QNetwork
@@ -113,41 +114,47 @@ class Trainer:
                 
                 action_tensor = torch.where(random_mask, random_actions, model_actions)
                 
-                # --- Step E: Reward Calculation (Vectorized) ---
-                # Reward Logic (Solution 1 & 3 & Pip Scaling)
-                # 1. Scaling Factor (Fix for EURUSD 'Decimal Dust')
-                if "USD" in symbol and "XAU" not in symbol:
-                     SCALING_FACTOR = 10000.0 # Forex (EURUSD, GBPUSD) -> 1 pip = 1.0
-                     spread_cost_per_unit = 0.0001
-                else: 
-                     SCALING_FACTOR = 1.0 # Gold/Indices -> $1 = 1.0 (Approx)
-                     spread_cost_per_unit = 0.20 # Gold Spread
+                # --- Step E: Reward Calculation (Pip Normalization) ---
+                # Load Profile Constants
+                profile = Settings.PAIR_CONFIGS[symbol]
+                SCALING_FACTOR = profile['scaling_factor']
+                SPREAD = profile['spread']
+                COMMISSION = profile['commission']
 
+                # 1. Raw PnL (Price Difference)
                 price_diff = next_price - curr_price
                 
-                # 2. Base Penalty (Holding Cost)
-                base_penalty = -0.1 * (spread_cost_per_unit * SCALING_FACTOR)
+                # 2. Normalized PnL (in Pips/Dollars)
+                # For EURUSD: 0.0001 -> 1.0
+                norm_pnl = price_diff * SCALING_FACTOR
+                
+                # 3. Normalized Costs
+                norm_spread = SPREAD * SCALING_FACTOR
+                norm_comm = COMMISSION * SCALING_FACTOR
+                total_cost = norm_spread + norm_comm
+                
+                # 4. Base Penalty (Holding Cost)
+                # Small negative reward to encourage efficiency
+                base_penalty = -0.1
                 reward_tensor = torch.full((batch_size,), base_penalty, device=self.device)
                 
                 # Masks
                 is_buy = (action_tensor == 1)
                 is_sell = (action_tensor == 2)
                 
-                # Pnl Calculation (Scaled)
-                buy_pnl = (price_diff - spread_cost_per_unit) * SCALING_FACTOR
-                sell_pnl = (-price_diff - spread_cost_per_unit) * SCALING_FACTOR
+                # 5. Final Reward Calculation
+                # Reward = (Normalized PnL - Costs)
                 
-                # 3. Reward Scaling (The Carrot)
-                # If PnL > 0, multiply allow 10.0
-                bias_scaler = 10.0
+                # Buy Logic
+                buy_reward = (norm_pnl - total_cost)
+                # Bias/Magnify Wins
+                buy_final = torch.where(buy_reward > 0, buy_reward * 10.0, buy_reward)
+                reward_tensor[is_buy] = buy_final[is_buy]
                 
-                # Buy Rewards
-                final_buy = torch.where(buy_pnl > 0, buy_pnl * bias_scaler, buy_pnl)
-                reward_tensor[is_buy] = final_buy[is_buy]
-                
-                # Sell Rewards
-                final_sell = torch.where(sell_pnl > 0, sell_pnl * bias_scaler, sell_pnl)
-                reward_tensor[is_sell] = final_sell[is_sell]
+                # Sell Logic
+                sell_reward = (-norm_pnl - total_cost)
+                sell_final = torch.where(sell_reward > 0, sell_reward * 10.0, sell_reward)
+                reward_tensor[is_sell] = sell_final[is_sell]
                 
                 # --- Step F: Learning (DQN Update) ---
                 # Q(s, a) = r + gamma * max(Q(s', a'))
@@ -183,7 +190,17 @@ class Trainer:
         torch.save(policy_net.state_dict(), model_path)
         logger.info(f"Model saved to {model_path}")
 
-if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Deep RL Trainer")
+    parser.add_argument("--pair", type=str, required=True, help="Symbol to train (e.g., EURUSD)")
+    args = parser.parse_args()
+    
+    symbol = args.pair.upper()
+    
+    if symbol not in Settings.PAIR_CONFIGS:
+        logger.error(f"Symbol {symbol} not found in Settings.PAIR_CONFIGS!")
+        logger.info(f"Available: {list(Settings.PAIR_CONFIGS.keys())}")
+        exit()
+
     if not mt5.initialize(
         path=Settings.MT5_PATH,
         login=Settings.MT5_LOGIN,
@@ -197,8 +214,7 @@ if __name__ == "__main__":
     trainer = Trainer()
     
     try:
-        for symbol in Settings.PAIRS:
-            trainer.train_model(symbol)
+        trainer.train_model(symbol)
     except KeyboardInterrupt:
         logger.info("Training interrupted by user.")
     finally:
