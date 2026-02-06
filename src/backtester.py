@@ -29,18 +29,20 @@ class Backtester:
         # Gold Spread ~20 cents. Comm ~$7/lot.
         # Assuming 0.01 lot size for testing.
         self.lot_size = 0.01
-        self.contract_size = 100 # Standard Gold contract 100oz
-        # Value of 1 point move for 0.01 lot = 0.01 * 100 * 1 = $1.00?
-        # Let's verify: Price 2000.00 -> 2001.00. 
-        # 1 oz (0.01 lot). Profit = $1.
-        
-        # User said: "Subtract Spread ($0.20 for Gold) and Commission ($7.00 per round trip lot)"
-        # Spread Cost: $0.20 per unit? Or $0.20 flat (meaning spread is 20 cents price diff)?
-        # If price diff is $0.20, and we hold 1 oz (0.01 lot), cost is $0.20.
-        # Comm Cost: $7.00 * 0.01 = $0.07.
-        # Total per trade = $0.27.
-        self.spread_cost_per_trade = 0.20 
-        self.comm_per_round_trip = 0.07 # for 0.01 lot
+        # Costs (Dynamic based on Symbol)
+        if "USD" in symbol and "XAU" not in symbol:
+             # Forex (EURUSD, GBPUSD)
+             # Standard Lot = 100,000 units. 0.01 Lot = 1,000 units.
+             self.contract_size = 100000 
+             # Costs: Spread (~1 pip = $0.10 for 0.01 lot) + Comm (~$0.07) -> ~$0.17
+             # Simplified: $0.15 total per trade
+             self.spread_cost_per_trade = 0.10 
+             self.comm_per_round_trip = 0.07 
+        else:
+             # Gold (XAUUSD)
+             self.contract_size = 100 # 100 oz
+             self.spread_cost_per_trade = 0.20 
+             self.comm_per_round_trip = 0.07
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -123,7 +125,16 @@ class Backtester:
             # --- Model Prediction ---
             with torch.no_grad():
                 q_values = self.model(state_tensor)
-                action = torch.argmax(q_values).item() # 0=Hold, 1=Buy, 2=Sell
+                
+                # PROBABILITY FILTER (Fix 1: Confidence > 0.60)
+                probs = torch.nn.functional.softmax(q_values, dim=1)
+                confidence, action = torch.max(probs, dim=1)
+                action = action.item()
+                confidence = confidence.item()
+
+                # If confidence is weak, Hold
+                if action != 0 and confidence < 0.95:
+                     action = 0
             
             # --- Execution Logic (at t+1 Open) ---
             next_open = opens[t+1]
@@ -132,7 +143,7 @@ class Backtester:
             next_time = times[t+1]
             atr = atrs[t]
             
-            # Check Exits first (Stop Loss / Time)
+            # Check Exits first (Stop Loss / Time / Breakeven)
             if position != 0:
                 # Time Exit (20:00)
                 if next_time.hour >= 20 and next_time.minute == 0:
@@ -144,10 +155,24 @@ class Backtester:
                     if next_low <= stop_loss:
                          self.close_position(1, stop_loss, "SL Hit")
                          position = 0
+                    
+                    # BREAKEVEN TRIGGER (Upgrade 1)
+                    # If profit > 1.0 * ATR, move SL to Entry + Spread
+                    elif (next_high - entry_price) > (1.0 * atr) and stop_loss < entry_price:
+                        stop_loss = entry_price + (self.spread_cost_per_trade * 0.01) # Approx points
+                        # Note: spread_cost_per_trade is in $. Need points.
+                        # Assuming 1 pt = $1 for 0.01 lot.
+                        # Let's use ATR/10 for a small buffer or just Entry.
+                        stop_loss = entry_price 
+                        
                 elif position == -1: # Short
                     if next_high >= stop_loss:
                          self.close_position(-1, stop_loss, "SL Hit")
                          position = 0
+                    
+                    # BREAKEVEN TRIGGER (Upgrade 1)
+                    elif (entry_price - next_low) > (1.0 * atr) and stop_loss > entry_price:
+                        stop_loss = entry_price
             
             # Process Signal (Entry / Close)
             if action == 1: # Signal BUY

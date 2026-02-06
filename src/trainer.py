@@ -114,19 +114,39 @@ class Trainer:
                 action_tensor = torch.where(random_mask, random_actions, model_actions)
                 
                 # --- Step E: Reward Calculation (Vectorized) ---
-                # Recall Reward based on price change
+                # Reward Logic (Solution 1 & 3 & Pip Scaling)
+                # 1. Scaling Factor (Fix for EURUSD 'Decimal Dust')
+                if "USD" in symbol and "XAU" not in symbol:
+                     SCALING_FACTOR = 10000.0 # Forex (EURUSD, GBPUSD) -> 1 pip = 1.0
+                     spread_cost_per_unit = 0.0001
+                else: 
+                     SCALING_FACTOR = 1.0 # Gold/Indices -> $1 = 1.0 (Approx)
+                     spread_cost_per_unit = 0.20 # Gold Spread
+
                 price_diff = next_price - curr_price
                 
-                # Spread cost approximation
-                spread_penalty = 0.0002 * curr_price
+                # 2. Base Penalty (Holding Cost)
+                reward_tensor = -0.1 * (spread_cost_per_unit * SCALING_FACTOR)
                 
-                reward_tensor = torch.zeros(batch_size, device=self.device)
+                # Masks
+                is_buy = (action_tensor == 1)
+                is_sell = (action_tensor == 2)
                 
-                # Buy
-                reward_tensor[action_tensor == 1] = price_diff[action_tensor == 1] - spread_penalty[action_tensor == 1]
-                # Sell
-                reward_tensor[action_tensor == 2] = -price_diff[action_tensor == 2] - spread_penalty[action_tensor == 2]
-                # Hold -> 0
+                # Pnl Calculation (Scaled)
+                buy_pnl = (price_diff - spread_cost_per_unit) * SCALING_FACTOR
+                sell_pnl = (-price_diff - spread_cost_per_unit) * SCALING_FACTOR
+                
+                # 3. Reward Scaling (The Carrot)
+                # If PnL > 0, multiply allow 10.0
+                bias_scaler = 10.0
+                
+                # Buy Rewards
+                final_buy = torch.where(buy_pnl > 0, buy_pnl * bias_scaler, buy_pnl)
+                reward_tensor[is_buy] = final_buy[is_buy]
+                
+                # Sell Rewards
+                final_sell = torch.where(sell_pnl > 0, sell_pnl * bias_scaler, sell_pnl)
+                reward_tensor[is_sell] = final_sell[is_sell]
                 
                 # --- Step F: Learning (DQN Update) ---
                 # Q(s, a) = r + gamma * max(Q(s', a'))
