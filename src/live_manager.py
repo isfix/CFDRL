@@ -149,12 +149,9 @@ def execute_trade(symbol, signal, df_features=None):
         magic = Settings.MAGIC_NUMBER_BASE
 
     # --- Time Filter ---
-    # Close all positions after 20:00 (8 PM)
-    if datetime.now().hour >= 20:
-        if current_pos:
-            close_position(current_pos, symbol)
-            logger.info(f"Time filter: Closed position for {symbol}")
-        return
+    # --- Time Filter REMOVED ---
+    # User Optimization: 24h Trading
+    pass
 
     # --- Logic ---
     # Need Latest Price for SL/TP

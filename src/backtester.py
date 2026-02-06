@@ -143,9 +143,10 @@ class Backtester:
                      
                      # 1. TIME FILTER (EURUSD Kill Switch)
                      # Only trade 08:00 - 17:00
-                     if "USD" in symbol and "XAU" not in symbol:
-                          if current_time.hour < 8 or current_time.hour > 17:
-                               action = 0 # Forced Wait (Asian Session)
+                     
+                     # 1. TIME FILTER REMOVED (24h Trading)
+                     # User Optimization: Allow EURUSD to trade all sessions.
+                     pass 
                      
                      # 2. BOLLINGER SQUEEZE FILTER
                      # Need to access BB columns. 
