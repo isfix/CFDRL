@@ -114,11 +114,14 @@ def get_signal(symbol):
     with torch.no_grad():
         q_values = active_models[symbol](seq_tensor)
         
-        # PROBABILITY FILTER REMOVED (Machine Gunner Mode) 
-        # We want to take every trade the model suggests.
-        action = torch.argmax(q_values, dim=1).item()
+        # 1. ADX FILTER (Dead Market Avoidance)
+        # ADX is the LAST feature (index -1)
+        # state is shape (1, seq_len, features) -> we want most recent step
+        current_adx = seq_tensor[0, -1, -1].item() * 100.0 # Un-normalize
         
-        # Confidence check deleted.
+        if current_adx < 25:
+            # print(f"  [FILTER] ADX {current_adx:.1f} < 25. Market Dead. Holding.")
+            action = 0
         
     return action, df_features
 

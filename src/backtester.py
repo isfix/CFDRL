@@ -133,35 +133,36 @@ class Backtester:
                 
                 # Confidence check deleted.
 
-                # --- FILTERS (Asset Personality Fix) ---
+                # --- FILTERS (Asset Personality) ---
                 if action != 0: # Only filter if trying to trade
-                     current_time = pd.to_datetime(time_idx) # Ensure datetime
-                     
-                     # 1. TIME FILTER (EURUSD Kill Switch)
-                     # Only trade 08:00 - 17:00
-                     
-                     # 1. TIME FILTER REMOVED (24h Trading)
-                     # User Optimization: Allow EURUSD to trade all sessions.
-                     pass 
-                     
-                     # 2. BOLLINGER SQUEEZE FILTER
-                     # Need to access BB columns. 
-                     # Optimally, we extracted them earlier in run_backtest.
-                     # But I need to ensure they are available here.
-                     # Let's assume they are in df_test.
-                     try:
-                         # Use t-1 (Last Closed Candle) for Filters to avoid Look-Ahead
-                         prev_idx = df_test.index[t-1]
-                         bb_u = df_test.loc[prev_idx, 'BBU_20_2.0']
-                         bb_l = df_test.loc[prev_idx, 'BBL_20_2.0']
-                         curr_close = df_test.loc[prev_idx, 'close']
-                         
-                         width = bb_u - bb_l
-                         vol_pct = width / curr_close
-                         if vol_pct < 0.0005:
-                              action = 0 # Forced Wait (Squeeze)
-                     except KeyError:
-                         pass # Columns not found, skip filter
+                    current_time = pd.to_datetime(time_idx) 
+                    
+                    # 1. ADX FILTER (Dead Market Avoidance)
+                    # "Do Not Disturb" sign for the AI.
+                    # ADX is the LAST feature (index -1)
+                    current_adx = state_tensor[0, -1, -1].item() * 100.0 # Un-normalize
+                    
+                    if current_adx < 25:
+                        action = 0 # Market is flat. Sit on hands.
+                    
+                    # 2. BOLLINGER SQUEEZE FILTER (Secondary Volatility Check)
+                    # Need to access BB columns. 
+                    # Optimally, we extracted them earlier in run_backtest.
+                    # But I need to ensure they are available here.
+                    # Let's assume they are in df_test.
+                    try:
+                        # Use t-1 (Last Closed Candle) for Filters to avoid Look-Ahead
+                        prev_idx = df_test.index[t-1]
+                        bb_u = df_test.loc[prev_idx, 'BBU_20_2.0']
+                        bb_l = df_test.loc[prev_idx, 'BBL_20_2.0']
+                        curr_close = df_test.loc[prev_idx, 'close']
+                        
+                        width = bb_u - bb_l
+                        vol_pct = width / curr_close
+                        if vol_pct < 0.0005:
+                             action = 0 # Forced Wait (Squeeze)
+                    except KeyError:
+                        pass # Columns not found, skip filter
             
             # --- Execution Logic (at t Open) ---
             # Decision made using data up to t-1 (Close). 

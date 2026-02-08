@@ -134,36 +134,28 @@ class Trainer:
                 total_cost = norm_spread + norm_comm
                 
                 # 4. Base Penalty (Holding Cost)
-                # 4. Base Penalty (Holding Cost)
-                # BINARY SCALPER FIX: High penalty to force action.
-                # "The only winning move is to play."
-                base_penalty = -0.5
+                # 3. Base Penalty
+                # HYBRID FIX: Small penalty to prevent laziness, but not force desperation.
+                base_penalty = -0.1
                 reward_tensor = torch.full((batch_size,), base_penalty, device=self.device)
                 
                 # Masks
                 is_buy = (action_tensor == 1)
                 is_sell = (action_tensor == 2)
                 
-                # 5. Final Reward Calculation (Binary Win/Loss)
-                # If PnL > Cost: +1.0
-                # If PnL < Cost: -1.0
+                # 4. Final Reward Calculation (Hybrid Tanh)
+                # Tanh squashes result between -1 and 1.
+                # Small wins (0.1) -> ~0.1 reward
+                # Big wins (10.0) -> ~1.0 reward (Capped)
                 
                 # Buy Logic
                 buy_net = (norm_pnl - total_cost)
-                buy_final = torch.where(
-                    buy_net > 0, 
-                    torch.tensor(1.0).to(self.device), 
-                    torch.tensor(-1.0).to(self.device)
-                )
+                buy_final = torch.tanh(buy_net)
                 reward_tensor[is_buy] = buy_final[is_buy]
                 
                 # Sell Logic
                 sell_net = (-norm_pnl - total_cost)
-                sell_final = torch.where(
-                    sell_net > 0, 
-                    torch.tensor(1.0).to(self.device), 
-                    torch.tensor(-1.0).to(self.device)
-                )
+                sell_final = torch.tanh(sell_net)
                 reward_tensor[is_sell] = sell_final[is_sell]
                 
                 # --- Step F: Learning (DQN Update) ---

@@ -100,8 +100,15 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # 4. ROC (Velocity) - Scaled x1000 (New "Godlike" Feature)
     # Rate of change over 3 bars to detect immediate momentum
-    df['roc'] = ta.roc(df['close'], length=3) * 10.0 # ROC is usually 0.01-0.5, *10 makes it 0.1-5.0
-    df.fillna(0, inplace=True) # Handle initial NaNs form ROC
+    df['roc'] = ta.roc(df['close'], length=3) * 10.0
+    
+    # ADX (Trend Strength) - Range 0-100 -> Normalized 0-1
+    # 0-25: Choppy/Dead, 25+: Trending, 50+: Strong Trend
+    adx = ta.adx(df['high'], df['low'], df['close'], length=14)
+    # pandas_ta returns ADX_14, DMP_14, DMN_14
+    df['adx'] = adx['ADX_14'] / 100.0
+    
+    df.fillna(0, inplace=True) # Handle initial NaNs form ROC and ADX
     
     # 5. Volatility (ATR / Close) - Scaled x1000
     atr = ta.atr(df['high'], df['low'], df['close'], length=Settings.ATR_PERIOD)
