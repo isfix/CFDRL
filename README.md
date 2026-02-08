@@ -4,7 +4,7 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
 [![MetaTrader 5](https://img.shields.io/badge/MetaTrader5-5.0-green.svg)](https://www.metatrader5.com/en/automated-trading/python)
 
-## 📜 Abstract
+## Abstract
 
 This project implements an advanced **Deep Reinforcement Learning (DRL)** agent designed for high-frequency Forex trading. Addressing the stochastic and noisy nature of financial markets, the system employs a novel combination of **Rich Factor Engineering**, **Prioritized Experience Replay (PER)**, and **Mid-Price Target** logic to extract predictive signals from raw OHLCV micro-structure.
 
@@ -15,7 +15,7 @@ The agent is built to overcome common DRL pitfalls in algorithmic trading, such 
 
 ---
 
-## 🚀 Key Features & Innovations
+## Key Features & Innovations
 
 ### 1. Rich Factor Universe (Phase 17)
 Most trading bots fail because they use standard indicators (RSI, MACD) which lag behind price. We implemented a **"Rich Factor" Miner** inspired by *Mann & Gorse* and *Da Costa & Gebbie*.
@@ -42,7 +42,7 @@ Financial markets are 90% noise and 10% signal. A standard Uniform Replay Buffer
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ```mermaid
 graph TD
@@ -69,7 +69,7 @@ graph TD
 
 ---
 
-## 🛠️ Installation
+## Installation
 
 ### Prerequisites
 *   Windows OS (Required for MetaTrader 5 Python API)
@@ -95,7 +95,7 @@ graph TD
 
 ---
 
-## 🎮 Usage Guide
+## Usage Guide
 
 ### 1. Feature Mining (Research Phase)
 Generate the "Rich Factor" universe and select the best predictors for a currency pair.
@@ -123,7 +123,7 @@ Upload `notebook/colab_training.ipynb` to Google Colab for high-speed GPU traini
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```text
 .
@@ -149,7 +149,7 @@ Upload `notebook/colab_training.ipynb` to Google Colab for high-speed GPU traini
 
 ---
 
-## 📚 References & Academic Citations
+## References & Academic Citations
 
 This project is grounded in cutting-edge financial machine learning research.
 
@@ -168,9 +168,3 @@ This project is grounded in cutting-edge financial machine learning research.
 5.  **Chen, G., Chen, Y., & Fushimi, T. (n.d.).** Application of Deep Learning to Algorithmic Trading. *Stanford University, Institute of Computational and Mathematical Engineering*.
 
 ---
-
-## 📄 License
-
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
-
-*Disclaimer: Financial trading involves significant risk. This software is for educational and research purposes only.*
