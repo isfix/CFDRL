@@ -134,26 +134,36 @@ class Trainer:
                 total_cost = norm_spread + norm_comm
                 
                 # 4. Base Penalty (Holding Cost)
-                # Small negative reward to encourage efficiency
-                base_penalty = -0.1
+                # 4. Base Penalty (Holding Cost)
+                # BINARY SCALPER FIX: High penalty to force action.
+                # "The only winning move is to play."
+                base_penalty = -0.5
                 reward_tensor = torch.full((batch_size,), base_penalty, device=self.device)
                 
                 # Masks
                 is_buy = (action_tensor == 1)
                 is_sell = (action_tensor == 2)
                 
-                # 5. Final Reward Calculation
-                # Reward = (Normalized PnL - Costs)
+                # 5. Final Reward Calculation (Binary Win/Loss)
+                # If PnL > Cost: +1.0
+                # If PnL < Cost: -1.0
                 
                 # Buy Logic
-                buy_reward = (norm_pnl - total_cost)
-                # Bias/Magnify Wins
-                buy_final = torch.where(buy_reward > 0, buy_reward * 10.0, buy_reward)
+                buy_net = (norm_pnl - total_cost)
+                buy_final = torch.where(
+                    buy_net > 0, 
+                    torch.tensor(1.0).to(self.device), 
+                    torch.tensor(-1.0).to(self.device)
+                )
                 reward_tensor[is_buy] = buy_final[is_buy]
                 
                 # Sell Logic
-                sell_reward = (-norm_pnl - total_cost)
-                sell_final = torch.where(sell_reward > 0, sell_reward * 10.0, sell_reward)
+                sell_net = (-norm_pnl - total_cost)
+                sell_final = torch.where(
+                    sell_net > 0, 
+                    torch.tensor(1.0).to(self.device), 
+                    torch.tensor(-1.0).to(self.device)
+                )
                 reward_tensor[is_sell] = sell_final[is_sell]
                 
                 # --- Step F: Learning (DQN Update) ---

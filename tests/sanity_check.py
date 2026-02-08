@@ -40,6 +40,7 @@ def run_sanity_check(symbol="EURUSD", tuning_file=None):
     # 3. Prepare Features
     df_small = data_factory.prepare_features(df_small)
     print(f"Data Shape after features: {df_small.shape}")
+    print(f"Feature Sample (First Row):\n{df_small[Settings.FEATURES].iloc[0]}")
     
     # 4. Create Dataset/Loader
     feature_data = df_small[Settings.FEATURES].values
@@ -50,7 +51,7 @@ def run_sanity_check(symbol="EURUSD", tuning_file=None):
     # 5. Initialize Model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy_net = QNetwork().to(device)
-    optimizer = optim.Adam(policy_net.parameters(), lr=0.001) # Aggressive Learning Rate for Overfitting
+    optimizer = optim.Adam(policy_net.parameters(), lr=0.0001) # Lower LR for stability with larger inputs
     loss_fn = nn.MSELoss()
     
     print(f"Training on {device} for 50 Epochs...")
@@ -115,22 +116,36 @@ def run_sanity_check(symbol="EURUSD", tuning_file=None):
             norm_pnl = diff * SCALING
             cost = SPREAD * SCALING
             
-            rewards = torch.full((batch_size,), -0.1, device=device)
+            # GODLIKE: Higher penalty for inaction to force scalping
+            base_penalty = -0.5 
+            rewards = torch.full((batch_size,), base_penalty, device=device)
             
             is_buy = (actions == 1)
             is_sell = (actions == 2)
             
+            # Buy Logic (Consistency Focus)
             buy_r = (norm_pnl - cost)
-            rewards[is_buy] = torch.where(buy_r > 0, buy_r * 10, buy_r)[is_buy]
+            buy_final = torch.where(
+                buy_r > 0, 
+                buy_r + 1.0,  # Bonus for winning
+                buy_r * 2.0   # Punishment for losing
+            )
+            rewards[is_buy] = torch.clamp(buy_final[is_buy], -2.0, 5.0)
             
+            # Sell Logic
             sell_r = (-norm_pnl - cost)
-            rewards[is_sell] = torch.where(sell_r > 0, sell_r * 10, sell_r)[is_sell]
+            sell_final = torch.where(
+                sell_r > 0, 
+                sell_r + 1.0, 
+                sell_r * 2.0
+            )
+            rewards[is_sell] = torch.clamp(sell_final[is_sell], -2.0, 5.0)
             
             # Update
             curr_q = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
             with torch.no_grad():
                 next_q = policy_net(next_state).max(1)[0]
-                target_q = rewards + (0.99 * next_q)
+                target_q = rewards + (0.85 * next_q) # Gamma 0.85
                 
             loss = loss_fn(curr_q, target_q)
             

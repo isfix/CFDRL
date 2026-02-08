@@ -88,19 +88,24 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     # Copy to avoid SettingWithCopy warnings
     df = df.copy()
 
-    # 1. Log Returns (Momentum)
-    df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
+    # 1. Log Returns (Momentum) - Scaled x1000
+    df['log_ret'] = np.log(df['close'] / df['close'].shift(1)) * 1000.0
 
-    # 2. Distance from 50 EMA (Trend)
+    # 2. Distance from 50 EMA (Trend) - Scaled x1000
     ema50 = ta.ema(df['close'], length=50)
-    df['dist_ema'] = (df['close'] - ema50) / df['close']
+    df['dist_ema'] = ((df['close'] - ema50) / df['close']) * 1000.0
 
     # 3. RSI (Oscillator) - Scaled 0-1
     df['rsi'] = ta.rsi(df['close'], length=14) / 100.0
 
-    # 4. Volatility (ATR / Close)
+    # 4. ROC (Velocity) - Scaled x1000 (New "Godlike" Feature)
+    # Rate of change over 3 bars to detect immediate momentum
+    df['roc'] = ta.roc(df['close'], length=3) * 10.0 # ROC is usually 0.01-0.5, *10 makes it 0.1-5.0
+    df.fillna(0, inplace=True) # Handle initial NaNs form ROC
+    
+    # 5. Volatility (ATR / Close) - Scaled x1000
     atr = ta.atr(df['high'], df['low'], df['close'], length=Settings.ATR_PERIOD)
-    df['volatility'] = atr / df['close']
+    df['volatility'] = (atr / df['close']) * 1000.0
 
     # 5. Time Context (Hour scaled 0-1)
     df['hour'] = df.index.hour / 23.0

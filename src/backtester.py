@@ -127,15 +127,11 @@ class Backtester:
             with torch.no_grad():
                 q_values = self.model(state_tensor)
                 
-                # PROBABILITY FILTER (Fix 1: Confidence > 0.60)
-                probs = torch.nn.functional.softmax(q_values, dim=1)
-                confidence, action = torch.max(probs, dim=1)
-                action = action.item()
-                confidence = confidence.item()
-
-                # If confidence is weak, Hold
-                if action != 0 and confidence < 0.95:
-                     action = 0
+                # PROBABILITY FILTER REMOVED (Machine Gunner Mode)
+                # We want to take every trade the model suggests.
+                action = torch.argmax(q_values, dim=1).item()
+                
+                # Confidence check deleted.
 
                 # --- FILTERS (Asset Personality Fix) ---
                 if action != 0: # Only filter if trying to trade

@@ -114,15 +114,11 @@ def get_signal(symbol):
     with torch.no_grad():
         q_values = active_models[symbol](seq_tensor)
         
-        # PROBABILITY FILTER (Fix 1: Confidence > 0.60)
-        probs = torch.nn.functional.softmax(q_values, dim=1)
-        confidence, action = torch.max(probs, dim=1)
-        action = action.item()
-        confidence = confidence.item()
+        # PROBABILITY FILTER REMOVED (Machine Gunner Mode) 
+        # We want to take every trade the model suggests.
+        action = torch.argmax(q_values, dim=1).item()
         
-        if action != 0 and confidence < 0.60:
-             # logger.info(f"{symbol}: Signal ignored due to low confidence ({confidence:.2f} < 0.60)")
-             action = 0 # VETO: Low Confidence
+        # Confidence check deleted.
         
     return action, df_features
 
