@@ -13,34 +13,26 @@ import argparse
 from config import Settings
 from src import data_factory
 from src.brain import QNetwork
+from src.per_memory import PrioritizedReplayBuffer # Phase 16: PER
 from src.utils import logger
 import os
 from torch.utils.data import Dataset, DataLoader
+import random
 
 class TradingDataset(Dataset):
     def __init__(self, feature_data, close_prices, seq_len):
         self.feature_data = feature_data
         self.close_prices = close_prices
         self.seq_len = seq_len
-        # Valid indices match the original loop: range(Settings.SEQUENCE_LENGTH, len(df) - 1)
-        # i goes from seq_len to len(df) - 2
-        # feature_data length is len(df)
         self.valid_indices = range(seq_len, len(feature_data) - 1)
 
     def __len__(self):
         return len(self.valid_indices)
 
     def __getitem__(self, idx):
-        # Map idx (0 to len-1) to the actual index i in feature_data
         i = self.valid_indices[idx]
-
-        # State: i - seq_len : i
         state_window = self.feature_data[i - self.seq_len : i]
-
-        # Next State: i - seq_len + 1 : i + 1
         next_state_window = self.feature_data[i - self.seq_len + 1 : i + 1]
-
-        # Prices for reward calculation
         curr_price = self.close_prices[i-1]
         next_price = self.close_prices[i]
 
@@ -56,7 +48,8 @@ class Trainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Training on device: {self.device}")
         
-        self.loss_fn = nn.MSELoss()
+        # PER uses Importance Sampling Weights, so we need reduction='none'
+        self.loss_fn = nn.MSELoss(reduction='none')
 
     def train_model(self, symbol: str):
         logger.info(f"Starting training for {symbol}...")
@@ -73,59 +66,108 @@ class Trainer:
             return
 
         # 2. Prepare Sliding Window Dataset
-        # Convert DataFrame to numpy for faster access
-        # We need the FEATURES columns for input, and CLOSE price for reward calculation
         feature_data = df[Settings.FEATURES].values
-        close_prices = df['close'].values
+        # PAPER IMPLEMENTATION: Train on Mid-Price to learn "True Trend"
+        close_prices = df['mid_price'].values
         
         dataset = TradingDataset(feature_data, close_prices, Settings.SEQUENCE_LENGTH)
-        dataloader = DataLoader(dataset, batch_size=Settings.BATCH_SIZE, shuffle=True, drop_last=True)
         
+        # 3. Populate Prioritized Replay Buffer (Offline RL -> Online-style Memory)
+        memory_capacity = len(dataset)
+        memory = PrioritizedReplayBuffer(capacity=memory_capacity, alpha=Settings.PER_ALPHA)
+        
+        logger.info(f"Populating Replay Buffer with {memory_capacity} transitions...")
+        temp_loader = DataLoader(dataset, batch_size=4096, shuffle=False)
+        
+        for batch in tqdm(temp_loader, desc="Filling Memory"):
+            states = batch['state'].numpy()
+            next_states = batch['next_state'].numpy()
+            curr_prices = batch['curr_price'].numpy()
+            next_prices = batch['next_price'].numpy()
+            
+            for i in range(len(states)):
+                # Store tuple (state, next_state, curr_price, next_price, dummy_done)
+                data = (states[i], next_states[i], curr_prices[i], next_prices[i], False)
+                memory.push(0, 0, 0, 0, 0) # Placeholder args to init tree node
+                # Direct override to store our custom data in the buffer
+                # Accessing the internal data array of SumTree via the push index logic is tricky 
+                # because push already incremented 'write'. 
+                # But 'push' sets max priority.
+                # Actually, our `push` implementation in per_memory.py takes (s,a,r,s,d) and stores as a tuple.
+                # We should just pass our tuple as 'state' and ignore others, or modify push.
+                # Let's trust that we can retrieve what we put in.
+                
+                # We modified per_memory.py to store `data` tuple.
+                # memory.tree.add(max_prio, data)
+                # So we just need to pass meaningful data.
+                # Let's assume memory.push() stores the arguments as a tuple.
+                # Wait, looking at my `per_memory.py`:
+                # data = (state, action, reward, next_state, done)
+                # self.tree.add(max_prio, data)
+                
+                # So I should pass:
+                # state -> states[i]
+                # action -> next_states[i] (HACK: Storing next_state in action slot)
+                # reward -> curr_prices[i] (HACK: Storing curr_price in reward slot)
+                # next_state -> next_prices[i] (HACK: Storing next_price in next_state slot)
+                # done -> False
+                
+                memory.push(states[i], next_states[i], curr_prices[i], next_prices[i], False)
+
         # Initialize Model & Optimizer
         policy_net = QNetwork().to(self.device)
         optimizer = optim.Adam(policy_net.parameters(), lr=Settings.LEARNING_RATE)
         
         epsilon = Settings.EPSILON_START
         
-        # 3. Training Loop
+        # 4. Training Loop using PER
+        steps_per_epoch = len(dataset) // Settings.BATCH_SIZE
+        
         for epoch in range(Settings.EPOCHS):
             total_loss = 0
             
-            # Use tqdm for progress bar
-            pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{Settings.EPOCHS} - {symbol}")
+            # Annealing Beta (0.4 -> 1.0)
+            beta = 0.4 + (0.6 * (epoch / Settings.EPOCHS))
             
-            for batch in pbar:
-                state_tensor = batch['state'].to(self.device)
-                next_state_tensor = batch['next_state'].to(self.device)
-                curr_price = batch['curr_price'].to(self.device)
-                next_price = batch['next_price'].to(self.device)
+            pbar = tqdm(range(steps_per_epoch), desc=f"Epoch {epoch+1}/{Settings.EPOCHS}")
+            
+            for _ in pbar:
+                # A. Sample from PER
+                # Returns: (states, actions, rewards, next_states, dones, idxs, is_weights)
+                # But remember our HACK above!
+                # states -> state
+                # actions -> next_state
+                # rewards -> curr_price
+                # next_states -> next_price
+                
+                states, next_states_hack, curr_prices_hack, next_prices_hack, _, idxs, is_weights = memory.sample(Settings.BATCH_SIZE, beta)
+                
+                state_tensor = torch.FloatTensor(states).to(self.device)
+                next_state_tensor = torch.FloatTensor(next_states_hack).to(self.device)
+                curr_price = torch.FloatTensor(curr_prices_hack).to(self.device)
+                next_price = torch.FloatTensor(next_prices_hack).to(self.device)
+                weights_tensor = torch.FloatTensor(is_weights).to(self.device)
                 
                 batch_size = state_tensor.size(0)
 
-                # --- Step D: Epsilon-Greedy Action (Vectorized) ---
-                random_vals = torch.rand(batch_size, device=self.device)
-                random_mask = random_vals < epsilon
+                # --- Step D: Epsilon-Greedy Action ---
+                if random.random() < epsilon:
+                    action_tensor = torch.randint(0, Settings.OUTPUT_DIM, (batch_size,), device=self.device)
+                else:
+                    with torch.no_grad():
+                        q_values = policy_net(state_tensor)
+                        action_tensor = torch.argmax(q_values, dim=1)
                 
-                random_actions = torch.randint(0, Settings.OUTPUT_DIM, (batch_size,), device=self.device)
-                
-                with torch.no_grad():
-                    q_values = policy_net(state_tensor)
-                    model_actions = torch.argmax(q_values, dim=1)
-                
-                action_tensor = torch.where(random_mask, random_actions, model_actions)
-                
-                # --- Step E: Reward Calculation (Pip Normalization) ---
-                # Load Profile Constants
+                # --- Step E: Reward Calculation ---
                 profile = Settings.PAIR_CONFIGS[symbol]
                 SCALING_FACTOR = profile['scaling_factor']
                 SPREAD = profile['spread']
                 COMMISSION = profile['commission']
 
-                # 1. Raw PnL (Price Difference)
+                # 1. Raw PnL
                 price_diff = next_price - curr_price
                 
-                # 2. Normalized PnL (in Pips/Dollars)
-                # For EURUSD: 0.0001 -> 1.0
+                # 2. Normalized PnL
                 norm_pnl = price_diff * SCALING_FACTOR
                 
                 # 3. Normalized Costs
@@ -133,9 +175,7 @@ class Trainer:
                 norm_comm = COMMISSION * SCALING_FACTOR
                 total_cost = norm_spread + norm_comm
                 
-                # 4. Base Penalty (Holding Cost)
                 # 3. Base Penalty
-                # HYBRID FIX: Small penalty to prevent laziness, but not force desperation.
                 base_penalty = -0.1
                 reward_tensor = torch.full((batch_size,), base_penalty, device=self.device)
                 
@@ -144,38 +184,34 @@ class Trainer:
                 is_sell = (action_tensor == 2)
                 
                 # 4. Final Reward Calculation (Hybrid Tanh)
-                # Tanh squashes result between -1 and 1.
-                # Small wins (0.1) -> ~0.1 reward
-                # Big wins (10.0) -> ~1.0 reward (Capped)
-                
-                # Buy Logic
                 buy_net = (norm_pnl - total_cost)
                 buy_final = torch.tanh(buy_net)
                 reward_tensor[is_buy] = buy_final[is_buy]
                 
-                # Sell Logic
                 sell_net = (-norm_pnl - total_cost)
                 sell_final = torch.tanh(sell_net)
                 reward_tensor[is_sell] = sell_final[is_sell]
                 
                 # --- Step F: Learning (DQN Update) ---
-                # Q(s, a) = r + gamma * max(Q(s', a'))
+                current_q = policy_net(state_tensor).gather(1, action_tensor.unsqueeze(1)).squeeze(1)
                 
-                # Get Q-value for the taken action
-                current_q = policy_net(state_tensor).gather(1, action_tensor.unsqueeze(1))
-                
-                # Get Max Q for next state
                 with torch.no_grad():
                     next_q = policy_net(next_state_tensor).max(1)[0]
                     target_q = reward_tensor + (Settings.GAMMA * next_q)
                 
-                # Loss
-                loss = self.loss_fn(current_q.squeeze(1), target_q)
+                # Loss with IS Weights
+                loss_element = self.loss_fn(current_q, target_q)
+                loss = (loss_element * weights_tensor).mean()
                 
                 # Optimize
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                
+                # --- Step G: Update Priorities ---
+                # TD Error = |target - current|
+                td_errors = torch.abs(target_q - current_q).detach().cpu().numpy()
+                memory.update_priorities(idxs, td_errors)
                 
                 total_loss += loss.item()
             
@@ -183,7 +219,7 @@ class Trainer:
             if epsilon > Settings.EPSILON_MIN:
                 epsilon *= Settings.EPSILON_DECAY
             
-            avg_loss = total_loss / len(dataloader)
+            avg_loss = total_loss / steps_per_epoch
             logger.info(f"Epoch {epoch+1} done. Avg Loss: {avg_loss:.6f}, Epsilon: {epsilon:.4f}")
 
         # 4. Save Model

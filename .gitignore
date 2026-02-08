@@ -40,3 +40,6 @@ config.py
 # Data
 *.csv
 tests/data/
+plan1.md
+plan2.md
+plan3.md

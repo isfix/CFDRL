@@ -81,6 +81,7 @@ def fetch_data(symbol: str, num_bars: int) -> pd.DataFrame:
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Engineers the features required by the AI model.
+    Dynamically generates features listed in Settings.FEATURES.
     """
     if df.empty:
         return df
@@ -88,44 +89,126 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     # Copy to avoid SettingWithCopy warnings
     df = df.copy()
 
-    # 1. Log Returns (Momentum) - Scaled x1000
-    df['log_ret'] = np.log(df['close'] / df['close'].shift(1)) * 1000.0
-
-    # 2. Distance from 50 EMA (Trend) - Scaled x1000
-    ema50 = ta.ema(df['close'], length=50)
-    df['dist_ema'] = ((df['close'] - ema50) / df['close']) * 1000.0
-
-    # 3. RSI (Oscillator) - Scaled 0-1
-    df['rsi'] = ta.rsi(df['close'], length=14) / 100.0
-
-    # 4. ROC (Velocity) - Scaled x1000 (New "Godlike" Feature)
-    # Rate of change over 3 bars to detect immediate momentum
-    df['roc'] = ta.roc(df['close'], length=3) * 10.0
+    # --- MID-PRICE (Central to our noise reduction strategy) ---
+    df['mid_price'] = (df['high'] + df['low']) / 2.0
     
-    # ADX (Trend Strength) - Range 0-100 -> Normalized 0-1
-    # 0-25: Choppy/Dead, 25+: Trending, 50+: Strong Trend
-    adx = ta.adx(df['high'], df['low'], df['close'], length=14)
-    # pandas_ta returns ADX_14, DMP_14, DMN_14
-    df['adx'] = adx['ADX_14'] / 100.0
-    
-    df.fillna(0, inplace=True) # Handle initial NaNs form ROC and ADX
-    
-    # 5. Volatility (ATR / Close) - Scaled x1000
-    atr = ta.atr(df['high'], df['low'], df['close'], length=Settings.ATR_PERIOD)
-    df['volatility'] = (atr / df['close']) * 1000.0
-
-    # 5. Time Context (Hour scaled 0-1)
-    df['hour'] = df.index.hour / 23.0
-
-    # Bollinger Bands (Step 3: Squeeze Filter)
-    # Appends BBL_20_2.0, BBM_20_2.0, BBU_20_2.0
-    bb = ta.bbands(df['close'], length=20, std=2)
+    # --- INDICATORS FOR FILTERS (Calculated regardless of Feature usage) ---
+    # Bollinger Bands (Squeeze Filter)
+    bb = ta.bbands(df['mid_price'], length=20, std=2)
     bb.columns = ['BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0', 'BBB_20_2.0', 'BBP_20_2.0']
     df = pd.concat([df, bb], axis=1)
 
-    # Drop NaNs created by indicators (e.g., EMA need 50 bars)
-    df.dropna(inplace=True)
+    # ADX (Trend Filter)
+    # Always calculate ADX as it's used in filters, even if not in FEATURES
+    adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+    df['adx'] = adx_df['ADX_14'] / 100.0
+    
+    # --- DYNAMIC FEATURE GENERATION ---
+    for feature in Settings.FEATURES:
+        if feature in df.columns:
+            continue
+            
+        try:
+            # Parse Feature Name
+            parts = feature.split('_')
+            type_ = parts[0] # rel, spread, ratio, diff
+            
+            # 1. Relations (Ratio): rel_A_B -> A / B
+            if type_ == 'rel':
+                col_a = '_'.join(parts[1:-1]) # Handle mid_price (2 words)
+                col_b = parts[-1]
+                
+                # Fix for multi-word columns like mid_price
+                # If parts has 3 items: rel, mid, price? No.
+                # parts: ['rel', 'mid', 'price', 'close'] -> col_a: 'mid_price', col_b: 'close'
+                # parts: ['rel', 'close', 'mid', 'price'] -> col_a: 'close', col_b: 'mid_price'?
+                # This split logic is fragile. 
+                # Better: check if known columns exist.
+                known_cols = ['open', 'high', 'low', 'close', 'mid_price']
+                
+                # Re-parse robustly
+                # Find which known col is at the start of the rest?
+                rest = feature.replace('rel_', '')
+                
+                # Try to find split point
+                c1, c2 = None, None
+                for k in known_cols:
+                    if rest.startswith(k + '_'):
+                        c1 = k
+                        c2 = rest.replace(k + '_', '')
+                        break
+                
+                if c1 and c2 in known_cols:
+                    df[feature] = df[c1] / df[c2]
+                    
+            # 2. Spreads (Diff): spread_A_B -> A - B
+            elif type_ == 'spread':
+                rest = feature.replace('spread_', '')
+                c1, c2 = None, None
+                known_cols = ['open', 'high', 'low', 'close', 'mid_price']
+                for k in known_cols:
+                    if rest.startswith(k + '_'):
+                        c1 = k
+                        c2 = rest.replace(k + '_', '')
+                        break
+                
+                if c1 and c2 in known_cols:
+                    df[feature] = df[c1] - df[c2]
 
-    # Ensure we only have the required columns for the model + OHLC used for trading logic
-    # The model only sees Settings.FEATURES
+            # 3. Ratio Lag: ratio_A_B_lagN -> A / B.shift(N) (or A/A.shift(N) if B is missing)
+            elif type_ == 'ratio':
+                rest = feature.replace('ratio_', '')
+                if '_lag' in rest:
+                    base, lag_str = rest.split('_lag')
+                    lag = int(lag_str)
+                    
+                    # Try to split base into c1, c2
+                    known_cols = ['open', 'high', 'low', 'close', 'mid_price']
+                    c1, c2 = None, None
+                    
+                    # Check if base is a single column first
+                    if base in known_cols:
+                        df[feature] = df[base] / df[base].shift(lag)
+                    else:
+                        for k in known_cols:
+                            if base.startswith(k + '_'):
+                                c1 = k
+                                c2 = base.replace(k + '_', '')
+                                break
+                        
+                        if c1 and c2 in known_cols:
+                            df[feature] = df[c1] / df[c2].shift(lag)
+
+            # 4. Diff Lag: diff_A_B_lagN -> A - B.shift(N) (or A - A.shift(N))
+            elif type_ == 'diff':
+                rest = feature.replace('diff_', '')
+                if '_lag' in rest:
+                    base, lag_str = rest.split('_lag')
+                    lag = int(lag_str)
+                    
+                    known_cols = ['open', 'high', 'low', 'close', 'mid_price']
+                    c1, c2 = None, None
+                    
+                    # Check if base is a single column first
+                    if base in known_cols:
+                        df[feature] = df[base] - df[base].shift(lag)
+                    else:
+                        for k in known_cols:
+                            if base.startswith(k + '_'):
+                                c1 = k
+                                c2 = base.replace(k + '_', '')
+                                break
+                        
+                        if c1 and c2 in known_cols:
+                             df[feature] = df[c1] - df[c2].shift(lag)
+        except Exception as e:
+            logger.warning(f"Could not generate feature {feature}: {e}")
+
+    # Fill NaNs (created by lags/indicators)
+    df.fillna(0, inplace=True)
+    
+    # Drop initial rows that might be 0/invalid due to large lags
+    # Using a safe margin
+    df = df.iloc[50:]
+    
     return df
