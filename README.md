@@ -3,8 +3,6 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-ee4c2c.svg)](https://pytorch.org/)
 [![MetaTrader 5](https://img.shields.io/badge/MetaTrader5-5.0-green.svg)](https://www.metatrader5.com/en/automated-trading/python)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status: Production](https://img.shields.io/badge/Status-Production-success.svg)]()
 
 ## 📜 Abstract
 
