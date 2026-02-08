@@ -147,10 +147,7 @@ def execute_trade(symbol, signal, df_features=None):
     except ValueError:
         magic = Settings.MAGIC_NUMBER_BASE
 
-    # --- Time Filter ---
-    # --- Time Filter REMOVED ---
-    # User Optimization: 24h Trading
-    pass
+    # --- Time Filter REMOVED (User Optimization: 24h Trading) ---
 
     # --- Logic ---
     # Need Latest Price for SL/TP
@@ -279,6 +276,9 @@ def process_pair(symbol):
 
 def close_position(position, symbol):
     tick = mt5.symbol_info_tick(symbol)
+    if not tick:
+        return
+
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
@@ -292,7 +292,11 @@ def close_position(position, symbol):
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
-    mt5.order_send(request)
+    result = mt5.order_send(request)
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        logger.error(f"{symbol}: Close failed: {result.comment}")
+    else:
+        logger.info(f"{symbol}: Position closed. PnL: {result.profit}")
 
 # --- Main Daemon ---
 if __name__ == "__main__":
