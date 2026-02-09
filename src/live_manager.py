@@ -119,8 +119,8 @@ def get_signal(symbol):
         # state is shape (1, seq_len, features) -> we want most recent step
         current_adx = seq_tensor[0, -1, -1].item() * 100.0 # Un-normalize
         
-        if current_adx < 25:
-            # print(f"  [FILTER] ADX {current_adx:.1f} < 25. Market Dead. Holding.")
+        if current_adx < Settings.ADX_THRESHOLD:
+            # print(f"  [FILTER] ADX {current_adx:.1f} < {Settings.ADX_THRESHOLD}. Market Dead. Holding.")
             action = 0
         
     return action, df_features

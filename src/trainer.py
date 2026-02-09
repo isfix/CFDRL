@@ -176,7 +176,7 @@ class Trainer:
                 total_cost = norm_spread + norm_comm
                 
                 # 3. Base Penalty
-                base_penalty = -0.1
+                base_penalty = -0.5 # Aggressive Mode: Waiting is expensive
                 reward_tensor = torch.full((batch_size,), base_penalty, device=self.device)
                 
                 # Masks
