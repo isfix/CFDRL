@@ -122,6 +122,19 @@ def get_signal(symbol):
         if current_adx < Settings.ADX_THRESHOLD:
             # print(f"  [FILTER] ADX {current_adx:.1f} < {Settings.ADX_THRESHOLD}. Market Dead. Holding.")
             action = 0
+            
+        # 2. REGIME FILTER (EMA 200)
+        # Prevents trading against the major trend.
+        if action != 0:
+            current_price = df_features['close'].iloc[-1]
+            ema_200 = df_features['ema_200'].iloc[-1]
+            
+            if action == 1 and current_price < ema_200:
+                # print(f"  [FILTER] BUY Signal below EMA 200 ({current_price:.5f} < {ema_200:.5f}). Trend is Down. Holding.")
+                action = 0
+            elif action == 2 and current_price > ema_200:
+                # print(f"  [FILTER] SELL Signal above EMA 200 ({current_price:.5f} > {ema_200:.5f}). Trend is Up. Holding.")
+                action = 0
         
     return action, df_features
 

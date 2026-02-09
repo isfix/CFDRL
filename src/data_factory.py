@@ -112,6 +112,9 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
     df['adx'] = adx_df['ADX_14'] / 100.0
     
+    # --- REGIME FILTER (EMA 200) ---
+    df['ema_200'] = ta.ema(df['close'], length=200)
+    
     # Known columns for parsing validation
     known_cols = ['open', 'high', 'low', 'close', 'mid_price']
 

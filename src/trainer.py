@@ -65,19 +65,34 @@ class Trainer:
             logger.error(f"Not enough data after feature engineering for {symbol}.")
             return
 
-        # 2. Prepare Sliding Window Dataset
-        feature_data = df[Settings.FEATURES].values
-        # PAPER IMPLEMENTATION: Train on Mid-Price to learn "True Trend"
-        close_prices = df['mid_price'].values
+        # 2. Validation Split
+        split_idx = Settings.TRAIN_SPLIT_INDEX
+        if len(df) < split_idx + 1000:
+            logger.warning(f"Data length {len(df)} < Split Index {split_idx}. Using 90/10 split.")
+            split_idx = int(len(df) * 0.9)
+            
+        df_train = df.iloc[:split_idx].copy()
+        df_val = df.iloc[split_idx:].copy()
         
-        dataset = TradingDataset(feature_data, close_prices, Settings.SEQUENCE_LENGTH)
+        logger.info(f"Train/Val Split: {len(df_train)} / {len(df_val)} bars")
+
+        # 3. Prepare Datasets
+        # Train
+        train_features = df_train[Settings.FEATURES].values
+        train_prices = df_train['mid_price'].values
+        train_dataset = TradingDataset(train_features, train_prices, Settings.SEQUENCE_LENGTH)
         
-        # 3. Populate Prioritized Replay Buffer (Offline RL -> Online-style Memory)
-        memory_capacity = len(dataset)
+        # Val (for evaluation only)
+        val_features = df_val[Settings.FEATURES].values
+        val_prices = df_val['mid_price'].values
+        val_dataset = TradingDataset(val_features, val_prices, Settings.SEQUENCE_LENGTH)
+        
+        # 4. Populate Prioritized Replay Buffer (TRAIN SET ONLY)
+        memory_capacity = len(train_dataset)
         memory = PrioritizedReplayBuffer(capacity=memory_capacity, alpha=Settings.PER_ALPHA)
         
-        logger.info(f"Populating Replay Buffer with {memory_capacity} transitions...")
-        temp_loader = DataLoader(dataset, batch_size=4096, shuffle=False)
+        logger.info(f"Populating Replay Buffer with {memory_capacity} transitions (Train Set)...")
+        temp_loader = DataLoader(train_dataset, batch_size=4096, shuffle=False)
         
         for batch in tqdm(temp_loader, desc="Filling Memory"):
             states = batch['state'].numpy()
@@ -120,8 +135,8 @@ class Trainer:
         
         epsilon = Settings.EPSILON_START
         
-        # 4. Training Loop using PER
-        steps_per_epoch = len(dataset) // Settings.BATCH_SIZE
+        # 5. Training Loop using PER
+        steps_per_epoch = len(train_dataset) // Settings.BATCH_SIZE
         
         for epoch in range(Settings.EPOCHS):
             total_loss = 0
@@ -176,21 +191,30 @@ class Trainer:
                 total_cost = norm_spread + norm_comm
                 
                 # 3. Base Penalty
-                base_penalty = -0.5 # Aggressive Mode: Waiting is expensive
+                base_penalty = 0.0 # Sniper: Patience is Free
                 reward_tensor = torch.full((batch_size,), base_penalty, device=self.device)
                 
                 # Masks
                 is_buy = (action_tensor == 1)
                 is_sell = (action_tensor == 2)
                 
-                # 4. Final Reward Calculation (Hybrid Tanh)
-                buy_net = (norm_pnl - total_cost)
-                buy_final = torch.tanh(buy_net)
-                reward_tensor[is_buy] = buy_final[is_buy]
+                # 4. Final Reward Calculation (Binary: +1 / -2)
+                # Profit must be > 2.0 * Spread to count as a "Win" (Hurdle Rate)
+                hurdle = total_cost * 2.0
                 
+                # Buy Logic
+                buy_net = (norm_pnl - total_cost)
+                buy_reward = torch.where(buy_net > hurdle, 
+                                       torch.tensor(1.0, device=self.device), 
+                                       torch.where(buy_net < 0, torch.tensor(-2.0, device=self.device), torch.tensor(0.0, device=self.device)))
+                reward_tensor[is_buy] = buy_reward[is_buy]
+                
+                # Sell Logic
                 sell_net = (-norm_pnl - total_cost)
-                sell_final = torch.tanh(sell_net)
-                reward_tensor[is_sell] = sell_final[is_sell]
+                sell_reward = torch.where(sell_net > hurdle, 
+                                        torch.tensor(1.0, device=self.device), 
+                                        torch.where(sell_net < 0, torch.tensor(-2.0, device=self.device), torch.tensor(0.0, device=self.device)))
+                reward_tensor[is_sell] = sell_reward[is_sell]
                 
                 # --- Step F: Learning (DQN Update) ---
                 current_q = policy_net(state_tensor).gather(1, action_tensor.unsqueeze(1)).squeeze(1)
@@ -221,12 +245,50 @@ class Trainer:
             
             avg_loss = total_loss / steps_per_epoch
             logger.info(f"Epoch {epoch+1} done. Avg Loss: {avg_loss:.6f}, Epsilon: {epsilon:.4f}")
+            
+            # Validation Step
+            if (epoch + 1) % 5 == 0: # Validate every 5 epochs
+                self.validate(policy_net, val_dataset)
 
         # 4. Save Model
         os.makedirs("models", exist_ok=True)
         model_path = f"models/{symbol}_brain.pth"
         torch.save(policy_net.state_dict(), model_path)
         logger.info(f"Model saved to {model_path}")
+
+    def validate(self, policy_net, val_dataset):
+        policy_net.eval()
+        val_loader = DataLoader(val_dataset, batch_size=Settings.BATCH_SIZE, shuffle=False)
+        total_reward = 0
+        total_trades = 0
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                state_tensor = batch['state'].to(self.device).float()
+                curr_prices = batch['curr_price'].to(self.device).float()
+                next_prices = batch['next_price'].to(self.device).float()
+                
+                q_values = policy_net(state_tensor)
+                actions = torch.argmax(q_values, dim=1)
+                
+                # Simple PnL calc
+                # 0=Hold, 1=Buy, 2=Sell
+                price_diff = next_prices - curr_prices
+                
+                # Buy PnL
+                buy_pnl = price_diff[actions == 1]
+                total_reward += buy_pnl.sum().item()
+                total_trades += (actions == 1).sum().item()
+                
+                # Sell PnL
+                sell_pnl = -price_diff[actions == 2]
+                total_reward += sell_pnl.sum().item()
+                total_trades += (actions == 2).sum().item()
+                
+        avg_reward = total_reward / total_trades if total_trades > 0 else 0
+        logger.info(f"[VALIDATION] Trades: {total_trades}, Net PnL (Pts): {total_reward:.5f}, Avg: {avg_reward:.5f}")
+        policy_net.train()
+        return total_reward
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Deep RL Trainer")
