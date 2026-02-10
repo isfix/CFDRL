@@ -1,3 +1,10 @@
+# src/backtester.py
+"""
+Phase 27: Backtester with all P0/P1/P2 fixes.
+
+P1: Take-Profit (ATR-based symmetric TP/SL)
+P2: Swap costs (overnight financing), latency model (1-bar execution delay)
+"""
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
@@ -7,7 +14,6 @@ from tqdm import tqdm
 import sys
 import os
 
-# Add parent directory to path to import config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Settings
@@ -19,35 +25,22 @@ class Backtester:
     def __init__(self, symbol, initial_balance=10000):
         self.symbol = symbol
         self.balance = initial_balance
-        self.equity = initial_balance
         self.equity_curve = [initial_balance]
-        self.trades = []
-        self.win_count = 0
-        self.loss_count = 0
-        
-        # Costs (Dynamic from Config)
-        self.lot_size = 0.01
         
         if symbol in Settings.PAIR_CONFIGS:
-             profile = Settings.PAIR_CONFIGS[symbol]
-             self.contract_size = profile['contract_size']
-             
-             # Calculate Costs in $
-             # Spread Cost = Spread * Contract * Lot
-             self.spread_cost_per_trade = profile['spread'] * self.contract_size * self.lot_size
-             self.comm_per_round_trip = profile['commission'] * self.contract_size * self.lot_size
-             
+            profile = Settings.PAIR_CONFIGS[symbol]
+            self.contract_size = profile['contract_size']
+            self.spread = profile['spread']
+            self.commission = profile['commission']
         elif "USD" in symbol and "XAU" not in symbol:
-             # Fallback Forex
-             self.contract_size = 100000
-             self.spread_cost_per_trade = 0.10
-             self.comm_per_round_trip = 0.15
+            self.contract_size = 100000
+            self.spread = 0.0001
+            self.commission = 0.0
         else:
-             # Fallback Gold
-             self.contract_size = 100
-             self.spread_cost_per_trade = 0.20
-             self.comm_per_round_trip = 0.07
-             
+            self.contract_size = 100
+            self.spread = 0.20
+            self.commission = 0.0
+              
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     def load_model(self):
@@ -55,47 +48,74 @@ class Backtester:
         model_path = f"models/{self.symbol}_brain.pth"
         if os.path.exists(model_path):
             self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-            self.model.eval() # Set to eval mode (No Dropout)
+            self.model.eval()
             print(f"Loaded model from {model_path}")
         else:
             print(f"Model {model_path} not found!")
             exit()
 
-    # run() and close_position() removed as they are superseded by run_backtest() logic
-
-
-    def print_stats(self):
+    def print_stats(self, trades):
+        if not trades:
+            print("\n--- RESULTS ---")
+            print("No trades executed.")
+            return
+            
+        wins = [t for t in trades if t > 0]
+        losses = [t for t in trades if t <= 0]
+        
         print("\n--- RESULTS ---")
         print(f"Final Balance: ${self.balance:.2f}")
-        print(f"Total Trades: {len(self.trades)}")
-        print(f"Win Rate: {self.win_count / len(self.trades) * 100 if self.trades else 0:.1f}%")
+        print(f"Total Trades: {len(trades)}")
+        print(f"Wins: {len(wins)} | Losses: {len(losses)}")
+        print(f"Win Rate: {len(wins) / len(trades) * 100:.1f}%")
+        print(f"Total PnL: ${sum(trades):.2f}")
+        print(f"Avg Trade: ${np.mean(trades):.4f}")
+        print(f"Max Win: ${max(trades):.4f}")
+        print(f"Max Loss: ${min(trades):.4f}")
+        
+        if len(trades) > 1 and np.std(trades) > 0:
+            sharpe = (np.mean(trades) / np.std(trades)) * np.sqrt(len(trades))
+            print(f"Sharpe Ratio (trade-level): {sharpe:.4f}")
+        
+        # Max Drawdown
+        peak = self.equity_curve[0]
+        max_dd = 0
+        for eq in self.equity_curve:
+            if eq > peak:
+                peak = eq
+            dd = (peak - eq) / peak
+            if dd > max_dd:
+                max_dd = dd
+        print(f"Max Drawdown: {max_dd * 100:.2f}%")
         
     def plot_equity(self):
-        plt.figure(figsize=(12, 6))
-        plt.plot(self.equity_curve)
-        plt.title(f"Equity Curve - {self.symbol}")
+        plt.figure(figsize=(14, 6))
+        plt.plot(self.equity_curve, linewidth=0.8)
+        plt.title(f"Equity Curve - {self.symbol} (Phase 27)")
         plt.ylabel("Balance ($)")
         plt.xlabel("Bars")
-        plt.grid()
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
         plt.show()
 
-# --- Redefining Run to include logic correctly ---
-# I will use a more monolithic run method to ensure variable scope is correct
-    
+
 def run_backtest(symbol):
     tester = Backtester(symbol)
     tester.load_model()
     
-    # ... Fetch Data ...
     df = data_factory.fetch_data(symbol, Settings.TRAIN_DATA_BARS)
-    if df.empty: return
+    if df.empty:
+        return
 
-    test_start_idx = Settings.TEST_SPLIT_INDEX
-    if len(df) < test_start_idx + 100: return
+    test_start_idx = len(df) - Settings.TEST_WINDOW
+    if test_start_idx < 0:
+        test_start_idx = int(len(df) * 0.8)
     
-    df_test = df.iloc[test_start_idx:].copy()
-    df_test = data_factory.prepare_features(df_test)
-    if len(df_test) < Settings.SEQUENCE_LENGTH: return
+    df_test_raw = df.iloc[test_start_idx:].copy()
+    df_test = data_factory.prepare_features(df_test_raw)
+    if len(df_test) < Settings.SEQUENCE_LENGTH + 2:
+        print("Not enough data after feature engineering.")
+        return
 
     feature_data = df_test[Settings.FEATURES].values
     opens = df_test['open'].values
@@ -103,124 +123,188 @@ def run_backtest(symbol):
     lows = df_test['low'].values
     closes = df_test['close'].values
     times = df_test.index
-    atrs = df_test['volatility'].values * closes
-    
-    position = 0 # 0, 1, -1
+    atrs = df_test['volatility'].values * closes  # Absolute ATR
+
+    # State
+    position = 0.0
     entry_price = 0.0
     stop_loss = 0.0
+    take_profit = 0.0        # P1: TP tracking
+    current_lot = 0.0
+    entry_bar = 0             # P2: Track position duration for swap costs
     
-    # Statistics
     trades = []
+    swap_costs_total = 0.0
+    tp_hits = 0
+    sl_hits = 0
+    action_counts = {i: 0 for i in range(Settings.OUTPUT_DIM)}
+    
+    # P2: Pending orders (latency model — 1 bar execution delay)
+    pending_order = None  # (bar_index, target_position)
     
     print(f"Running simulation on {len(df_test)} bars...")
     
-    for t in tqdm(range(Settings.SEQUENCE_LENGTH, len(df_test) - 1)):
-        # Data at t is CLOSED. We decide.
-        # Execution is at t+1 OPEN.
+    for t in tqdm(range(Settings.SEQUENCE_LENGTH, len(df_test) - 2)):
+        # --- P2: Execute pending order from previous bar ---
+        if pending_order is not None:
+            order_bar, target_pos = pending_order
+            pending_order = None
+            
+            exec_bar = t  # Execute at current bar's open (1-bar delay)
+            slippage = np.random.uniform(0, 0.5) * tester.spread
+            
+            # Close existing if direction change
+            if position != 0 and np.sign(target_pos) != np.sign(position):
+                if position > 0:
+                    exit_price = opens[exec_bar] - slippage
+                    raw_pnl = (exit_price - entry_price) * tester.contract_size * current_lot
+                else:
+                    exit_price = opens[exec_bar] + slippage
+                    raw_pnl = (entry_price - exit_price) * tester.contract_size * current_lot
+                
+                spread_cost = tester.spread * tester.contract_size * current_lot
+                comm_cost = tester.commission * tester.contract_size * current_lot
+                
+                # P2: Swap cost for multi-day hold
+                bars_held = t - entry_bar
+                days_held = bars_held / (12 * 24)  # M5 bars per day
+                swap_cost = 0.0
+                if days_held >= 1.0:
+                    position_value = abs(entry_price * tester.contract_size * current_lot)
+                    swap_cost = position_value * Settings.SWAP_RATE_ANNUAL / 365.0 * days_held
+                    swap_costs_total += swap_cost
+                
+                net_pnl = raw_pnl - spread_cost - comm_cost - swap_cost
+                tester.balance += net_pnl
+                trades.append(net_pnl)
+                position = 0.0
+                current_lot = 0.0
+            
+            # Open new position
+            if abs(target_pos) > 0.01 and position == 0:
+                current_lot = round(abs(target_pos) * Settings.MAX_LOT_SIZE, 2)
+                current_lot = max(current_lot, 0.01)
+                atr = atrs[exec_bar]
+                
+                if target_pos > 0:
+                    position = target_pos
+                    entry_price = opens[exec_bar] + slippage
+                    stop_loss = entry_price - (atr * Settings.ATR_SL_MULTIPLIER)
+                    take_profit = entry_price + (atr * Settings.ATR_TP_MULTIPLIER)  # P1
+                else:
+                    position = target_pos
+                    entry_price = opens[exec_bar] - slippage
+                    stop_loss = entry_price + (atr * Settings.ATR_SL_MULTIPLIER)
+                    take_profit = entry_price - (atr * Settings.ATR_TP_MULTIPLIER)  # P1
+                
+                entry_bar = exec_bar
         
-        state_tensor = torch.FloatTensor(feature_data[t - Settings.SEQUENCE_LENGTH : t]).unsqueeze(0).to(tester.device)
+        # --- AI Decision (creates pending order with 1-bar delay) ---
+        state_tensor = torch.FloatTensor(
+            feature_data[t - Settings.SEQUENCE_LENGTH : t]
+        ).unsqueeze(0).to(tester.device)
         
         with torch.no_grad():
             q = tester.model(state_tensor)
-            action = torch.argmax(q).item()
-            
-        next_open = opens[t+1]
+            action_idx = torch.argmax(q).item()
+        
+        action_counts[action_idx] += 1
+        target_position = Settings.ACTION_MAP[action_idx]
+        
+        # P2: Queue order for next bar (latency model)
+        if abs(target_position - position) > 0.01:
+            pending_order = (t, target_position)
+        
+        # --- SL / TP CHECK on current bar ---
         next_high = highs[t+1]
         next_low = lows[t+1]
-        next_time = times[t+1]
-        atr = atrs[t]
         
-        # 1. CHECK EXIT for Existing Position
-        pnl = 0
-        trade_closed = False
-        
-        if position != 0:
-            exit_price = 0.0
-            
-            # Time Exit
-            if next_time.hour >= 20 and next_time.minute == 0:
-                exit_price = next_open
-                trade_closed = True
-            
-            # SL Hit (Assumes hit at SL price exactly - slippage ignored)
-            elif position == 1 and next_low <= stop_loss:
-                exit_price = stop_loss
-                trade_closed = True
-            elif position == -1 and next_high >= stop_loss:
-                exit_price = stop_loss
-                trade_closed = True
-                
-            # Logic Flip (handled below, but if closed here, we update)
-            
-            if trade_closed:
-                # Calc PnL
-                raw_pnl = (exit_price - entry_price) * tester.contract_size * tester.lot_size if position == 1 else (entry_price - exit_price) * tester.contract_size * tester.lot_size
-                # Deduct Costs
-                net_pnl = raw_pnl - tester.spread_cost_per_trade - tester.comm_per_round_trip
-                
+        # P1: Take-Profit check
+        if position > 0:
+            if next_high >= take_profit:
+                raw_pnl = (take_profit - entry_price) * tester.contract_size * current_lot
+                spread_cost = tester.spread * tester.contract_size * current_lot
+                net_pnl = raw_pnl - spread_cost
                 tester.balance += net_pnl
                 trades.append(net_pnl)
-                position = 0
-                
-        # 2. ENTRY / REVERSAL Logic
-        # Only if not just closed (or maybe we can reverse? kept simple)
-        if not trade_closed:
-            if action == 1: # Buy Signal
-                if position == -1: # Reverse Short -> Long
-                    # Close Short
-                    exit_price = next_open
-                    raw_pnl = (entry_price - exit_price) * tester.contract_size * tester.lot_size
-                    net_pnl = raw_pnl - tester.spread_cost_per_trade - tester.comm_per_round_trip
-                    tester.balance += net_pnl
-                    trades.append(net_pnl)
-                    
-                    # Open Long
-                    position = 1
-                    entry_price = next_open
-                    stop_loss = entry_price - (atr * 2.5)
-                    
-                elif position == 0: # Open Long
-                    position = 1
-                    entry_price = next_open
-                    stop_loss = entry_price - (atr * 2.5)
-            
-            elif action == 2: # Sell Signal
-                if position == 1: # Reverse Long -> Short
-                    # Close Long
-                    exit_price = next_open
-                    raw_pnl = (exit_price - entry_price) * tester.contract_size * tester.lot_size
-                    net_pnl = raw_pnl - tester.spread_cost_per_trade - tester.comm_per_round_trip
-                    tester.balance += net_pnl
-                    trades.append(net_pnl)
-                    
-                    # Open Short
-                    position = -1
-                    entry_price = next_open
-                    stop_loss = entry_price + (atr * 2.5)
-                    
-                elif position == 0: # Open Short
-                    position = -1
-                    entry_price = next_open
-                    stop_loss = entry_price + (atr * 2.5)
+                tp_hits += 1
+                position = 0.0
+                current_lot = 0.0
+                pending_order = None  # Cancel pending if TP hit
+            elif next_low <= stop_loss:
+                raw_pnl = (stop_loss - entry_price) * tester.contract_size * current_lot
+                spread_cost = tester.spread * tester.contract_size * current_lot
+                net_pnl = raw_pnl - spread_cost
+                tester.balance += net_pnl
+                trades.append(net_pnl)
+                sl_hits += 1
+                position = 0.0
+                current_lot = 0.0
+                pending_order = None
+        elif position < 0:
+            if next_low <= take_profit:
+                raw_pnl = (entry_price - take_profit) * tester.contract_size * current_lot
+                spread_cost = tester.spread * tester.contract_size * current_lot
+                net_pnl = raw_pnl - spread_cost
+                tester.balance += net_pnl
+                trades.append(net_pnl)
+                tp_hits += 1
+                position = 0.0
+                current_lot = 0.0
+                pending_order = None
+            elif next_high >= stop_loss:
+                raw_pnl = (entry_price - stop_loss) * tester.contract_size * current_lot
+                spread_cost = tester.spread * tester.contract_size * current_lot
+                net_pnl = raw_pnl - spread_cost
+                tester.balance += net_pnl
+                trades.append(net_pnl)
+                sl_hits += 1
+                position = 0.0
+                current_lot = 0.0
+                pending_order = None
         
-        # Tracking
         tester.equity_curve.append(tester.balance)
-        
-    tester.trades = trades
-    tester.win_count = sum(1 for x in trades if x > 0)
-    print("Backtest Complete.")
-    tester.print_stats()
+    
+    # --- Results ---
+    print("\n--- ACTION DISTRIBUTION ---")
+    action_labels = ["STRONG SELL", "SELL", "WEAK SELL", "HOLD", "WEAK BUY", "BUY", "STRONG BUY"]
+    total_bars = sum(action_counts.values())
+    for idx, label in enumerate(action_labels):
+        count = action_counts[idx]
+        pct = count / total_bars * 100 if total_bars > 0 else 0
+        print(f"  {label:>12}: {count:>6} ({pct:>5.1f}%)")
+    
+    print(f"\n--- EXIT BREAKDOWN ---")
+    signal_exits = len(trades) - tp_hits - sl_hits
+    print(f"  TP Hits: {tp_hits}")
+    print(f"  SL Hits: {sl_hits}")
+    print(f"  Signal Exits: {signal_exits}")
+    print(f"  Total Swap Costs: ${swap_costs_total:.4f}")
+    
+    tester.print_stats(trades)
     tester.plot_equity()
 
+
 if __name__ == "__main__":
-    if not mt5.initialize(path=Settings.MT5_PATH, login=Settings.MT5_LOGIN, password=Settings.MT5_PASSWORD, server=Settings.MT5_SERVER):
-         print("MT5 Init Failed")
-         exit()
-         
-    # Interactive Mode
-    user_symbol = input(f"Enter symbol to backtest (Available: {Settings.PAIRS}, Default: XAUUSD): ").strip().upper()
+    if not mt5.initialize(
+        path=Settings.MT5_PATH,
+        login=Settings.MT5_LOGIN,
+        password=Settings.MT5_PASSWORD,
+        server=Settings.MT5_SERVER
+    ):
+        logger.error(f"MT5 init failed.")
+        exit()
     
-    if not user_symbol:
-        user_symbol = "XAUUSD"
-        
-    run_backtest(user_symbol)
+    print(f"Available pairs: {Settings.PAIRS}")
+    user_symbol = input(f"Enter symbol to backtest (Default: XAUUSD): ").strip().upper() or "XAUUSD"
+    
+    if user_symbol not in Settings.PAIR_CONFIGS:
+        print(f"Symbol {user_symbol} not configured!")
+        exit()
+    
+    try:
+        run_backtest(user_symbol)
+    except KeyboardInterrupt:
+        print("\nBacktest interrupted.")
+    finally:
+        mt5.shutdown()
