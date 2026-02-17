@@ -1,27 +1,31 @@
 # src/brain.py
 """
-Phase 28: QNetwork with Feature Encoder.
+Position-Aware QNetwork.
 
-Changes from Phase 27:
-- Renamed sae_encoder -> feature_encoder (not a true autoencoder)
-- Added weight compatibility shim for loading old sae_encoder.* keys
+Accepts trade state (position, bars_held, unrealized_pnl) as additional input.
+Concatenates trade state with LSTM output before FC layers.
 """
 import torch
 import torch.nn as nn
 from collections import OrderedDict
 from config import Settings
 
+TRADE_STATE_DIM = 3  # [current_position, bars_held_normalized, unrealized_pnl]
+
+
 class QNetwork(nn.Module):
     def __init__(self, input_dim=Settings.INPUT_DIM,
                  encoder_dim=Settings.ENCODER_DIM,
-                 hidden_dim=Settings.HIDDEN_DIM, 
-                 num_layers=Settings.NUM_LAYERS, 
-                 dropout=Settings.DROPOUT, 
-                 output_dim=Settings.OUTPUT_DIM):
+                 hidden_dim=Settings.HIDDEN_DIM,
+                 num_layers=Settings.NUM_LAYERS,
+                 dropout=Settings.DROPOUT,
+                 output_dim=Settings.OUTPUT_DIM,
+                 trade_state_dim=TRADE_STATE_DIM):
         super(QNetwork, self).__init__()
         
+        self.trade_state_dim = trade_state_dim
+        
         # Feature Encoder: compress INPUT_DIM -> ENCODER_DIM per timestep
-        # Da Costa & Gebbie found 5-25 features optimal
         self.feature_encoder = nn.Sequential(
             nn.Linear(input_dim, input_dim),
             nn.ReLU(),
@@ -41,16 +45,20 @@ class QNetwork(nn.Module):
         # Layer Normalization
         self.layer_norm = nn.LayerNorm(hidden_dim)
         
-        # FC Output
+        # FC Output — takes LSTM output + trade state
+        fc_input_dim = hidden_dim + trade_state_dim
         self.fc = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(fc_input_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, output_dim)
         )
 
-    def forward(self, x):
-        """x shape: (batch_size, sequence_length, input_dim)"""
+    def forward(self, x, trade_state=None):
+        """
+        x shape: (batch_size, sequence_length, input_dim)
+        trade_state shape: (batch_size, trade_state_dim)  — [position, bars_held, unrealized_pnl]
+        """
         batch_size, seq_len, _ = x.size()
         
         # Apply feature encoder to each timestep
@@ -62,15 +70,23 @@ class QNetwork(nn.Module):
         lstm_out, _ = self.lstm(encoded)
         last_step = lstm_out[:, -1, :]
         
-        # LayerNorm + FC
+        # LayerNorm
         normalized = self.layer_norm(last_step)
-        return self.fc(normalized)
+        
+        # Concatenate trade state if provided
+        if trade_state is not None:
+            combined = torch.cat([normalized, trade_state], dim=1)
+        else:
+            # Zero trade state (for compatibility with old usage)
+            zeros = torch.zeros(batch_size, self.trade_state_dim, device=x.device)
+            combined = torch.cat([normalized, zeros], dim=1)
+        
+        return self.fc(combined)
 
     @staticmethod
     def load_with_compat(path, device='cpu'):
-        """Load model weights with backward compatibility for old sae_encoder.* keys."""
-        model = QNetwork().to(device)
-        state_dict = torch.load(path, map_location=device)
+        """Load model weights with auto-detected dimensions and key compatibility."""
+        state_dict = torch.load(path, map_location=device, weights_only=True)
         
         # Remap old sae_encoder.* keys -> feature_encoder.*
         new_dict = OrderedDict()
@@ -78,5 +94,23 @@ class QNetwork(nn.Module):
             new_key = k.replace('sae_encoder.', 'feature_encoder.')
             new_dict[new_key] = v
         
-        model.load_state_dict(new_dict)
+        # Auto-detect dimensions from checkpoint shapes
+        encoder_dim = new_dict['feature_encoder.2.weight'].shape[0]
+        hidden_dim = new_dict['layer_norm.weight'].shape[0]
+        output_dim = new_dict['fc.3.weight'].shape[0]
+        input_dim = new_dict['feature_encoder.0.weight'].shape[1]
+        num_layers = sum(1 for k in new_dict if 'lstm.weight_ih_l' in k)
+        
+        # Detect trade_state_dim from FC input
+        fc_input = new_dict['fc.0.weight'].shape[1]
+        trade_state_dim = fc_input - hidden_dim
+        if trade_state_dim < 0:
+            trade_state_dim = TRADE_STATE_DIM
+        
+        model = QNetwork(
+            input_dim=input_dim, encoder_dim=encoder_dim,
+            hidden_dim=hidden_dim, num_layers=num_layers,
+            output_dim=output_dim, trade_state_dim=trade_state_dim
+        ).to(device)
+        model.load_state_dict(new_dict, strict=False)
         return model

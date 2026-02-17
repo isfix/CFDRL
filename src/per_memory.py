@@ -120,10 +120,10 @@ class PrioritizedReplayBuffer:
         states, actions, rewards, next_states, dones = zip(*batch)
         
         return (
-            np.array(states), 
+            list(states),                          # Raw list (may be composite tuples)
             np.array(actions), 
             np.array(rewards, dtype=np.float32), 
-            np.array(next_states), 
+            list(next_states),                     # Raw list (may be composite tuples)
             np.array(dones, dtype=bool),
             idxs,
             np.array(is_weights, dtype=np.float32)

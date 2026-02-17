@@ -293,12 +293,9 @@ def process_pair(symbol):
                 prices = df_features['mid_price'].values
                 price_change = (prices[-1] - prices[-2]) * sf
                 
-                # Match training reward exactly:
-                vol_ratio = df_features['volatility_ratio'].iloc[-2] if 'volatility_ratio' in df_features.columns else 1.0
-                vol_safe = max(0.2, vol_ratio)
-                vol_scale = min(3.0, 1.0 / vol_safe)
+                # P30: Match training reward (simple PnL - cost, no vol scaling)
                 cost = Settings.TRANSACTION_COST_BPS * 0.0001 * sf * abs(prev_position)
-                reward = max(-5.0, min(5.0, vol_scale * prev_position * price_change - cost))
+                reward = max(-10.0, min(10.0, prev_position * price_change - cost))
                 
                 # Get state sequences for online buffer
                 features = df_features[Settings.FEATURES].values

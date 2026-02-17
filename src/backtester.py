@@ -44,10 +44,9 @@ class Backtester:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     def load_model(self):
-        self.model = QNetwork().to(self.device)
         model_path = f"models/{self.symbol}_brain.pth"
         if os.path.exists(model_path):
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+            self.model = QNetwork.load_with_compat(model_path, device=self.device)
             self.model.eval()
             print(f"Loaded model from {model_path}")
         else:
