@@ -203,7 +203,7 @@ class Trainer:
 
     def train_model(self, symbol: str):
         """Main training loop with sequential environment."""
-        logger.info(f"Phase B Training: {symbol}")
+        logger.info(f"Training: {symbol}")
         
         pair_cfg = Settings.PAIR_CONFIGS.get(symbol, Settings.PAIR_CONFIGS['EURUSD'])
         SCALING_FACTOR = pair_cfg['scaling_factor']
@@ -322,7 +322,7 @@ class Trainer:
                 episode_steps += 1
                 total_steps += 1
                 
-                # Per-step epsilon decay (Phase B FIX #3)
+                # Per-step epsilon decay
                 if Settings.EPSILON_DECAY_PER_STEP:
                     epsilon = max(Settings.EPSILON_MIN, epsilon * Settings.EPSILON_DECAY)
                 
@@ -369,7 +369,7 @@ class Trainer:
             if val_sharpe > best_val_sharpe:
                 best_val_sharpe = val_sharpe
                 patience_counter = 0
-                save_path = os.path.join("models", f"best_{symbol}_phaseB.pt")
+                save_path = os.path.join("models", f"best_{symbol}.pt")
                 os.makedirs("models", exist_ok=True)
                 torch.save(policy_net.state_dict(), save_path)
                 logger.info(f"  New best! Saved to {save_path}")
@@ -487,7 +487,7 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Phase B Trainer")
+    parser = argparse.ArgumentParser(description="DDQN Trainer")
     parser.add_argument("--pair", type=str, default="EURUSD", help="Symbol to train")
     args = parser.parse_args()
     symbol = args.pair

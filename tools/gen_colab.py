@@ -1,7 +1,7 @@
 """
-Phase B: Colab Notebook Generator.
-Creates a self-contained notebook with V2 features, TradingEnvironment, 
-position-aware QNetwork, and all Phase B bug fixes.
+Colab Notebook Generator.
+Self-contained notebook with 35 features, TradingEnvironment,
+position-aware QNetwork.
 """
 import json
 import os
@@ -30,8 +30,8 @@ def create_notebook():
     # CELL 0: Title
     # ============================================================
     cells.append(md_cell([
-        "# Phase B: Trading Bot Training\n",
-        "**V2 Features (35)** | **M15 Timeframe** | **Semantic Actions** | **All 4 Fatal Bugs Fixed**\n",
+        "# Trading Bot Training (Colab)\n",
+        "**35 Features** | **M15 Timeframe** | **Semantic Actions** | **Position-Aware QNetwork**\n",
         "\n",
         "Upload your EURUSD M5 CSV (columns: time, open, high, low, close, tick_volume) to `/content/`"
     ]))
@@ -126,7 +126,7 @@ def create_notebook():
         "    if 'tick_volume' in df.columns: agg['tick_volume'] = 'sum'\n",
         "    return df.resample(rule).agg(agg).dropna()\n",
         "\n",
-        "def prepare_features_v2(df):\n",
+        "def prepare_features(df):\n",
         "    df = df.copy()\n",
         "    if not isinstance(df.index, pd.DatetimeIndex):\n",
         "        if 'time' in df.columns:\n",
@@ -263,8 +263,8 @@ def create_notebook():
         "df = resample_ohlcv(raw_df, '15min')\n",
         "print(f'M15 bars: {len(df)}')\n",
         "\n",
-        "# Compute V2 features\n",
-        "df = prepare_features_v2(df)\n",
+        "# Compute features\n",
+        "df = prepare_features(df)\n",
         "print(f'Bars after features: {len(df)}')\n",
         "\n",
         "# Extract arrays\n",
@@ -645,7 +645,7 @@ def create_notebook():
         "    if vs > best_sharpe:\n",
         "        best_sharpe = vs\n",
         "        patience = 0\n",
-        "        torch.save(policy_net.state_dict(), f'/content/best_{Settings.PAIR}_phaseB.pt')\n",
+        "        torch.save(policy_net.state_dict(), f'/content/best_{Settings.PAIR}.pt')\n",
         "        print(f'  ** New best! Saved. **')\n",
         "    else:\n",
         "        patience += 1\n",
@@ -699,7 +699,7 @@ def create_notebook():
 
     cells.append(code_cell([
         "from google.colab import files\n",
-        "model_path = f'/content/best_{Settings.PAIR}_phaseB.pt'\n",
+        "model_path = f'/content/best_{Settings.PAIR}.pt'\n",
         "if os.path.exists(model_path):\n",
         "    files.download(model_path)\n",
         "    print(f'Model downloaded: {model_path}')\n",
@@ -723,7 +723,7 @@ def create_notebook():
 
 if __name__ == "__main__":
     nb = create_notebook()
-    out = "notebook/colab_training_phaseB.ipynb"
+    out = "notebook/colab_training.ipynb"
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, 'w', encoding='utf-8') as f:
         json.dump(nb, f, indent=4, ensure_ascii=False)
