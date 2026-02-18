@@ -1,9 +1,9 @@
 # src/live_manager.py
 """
-Phase 27: Live Manager with Online Learning + Take-Profit.
+Live Manager for position-aware QNetwork with 4 semantic actions.
 
-P0: Online learning (Da Costa & Gebbie OGD) — adapts to live market
-P1: Take-Profit via ATR_TP_MULTIPLIER
+Actions: HOLD(0), BUY(1), SELL(2), CLOSE(3)
+Features: Online learning, ATR-based SL/TP, spread filter, position tracking.
 """
 import MetaTrader5 as mt5
 import torch
@@ -27,41 +27,65 @@ from src.per_memory import PrioritizedReplayBuffer
 from src.utils import logger
 from concurrent.futures import ThreadPoolExecutor
 
+# Semantic actions (must match training)
+ACT_HOLD, ACT_BUY, ACT_SELL, ACT_CLOSE = 0, 1, 2, 3
+ACTION_NAMES = ['HOLD', 'BUY', 'SELL', 'CLOSE']
+
 # --- Global State ---
 active_models = {}         # {symbol: model_instance}
-online_optimizers = {}     # {symbol: optimizer} — for online learning
+online_optimizers = {}     # {symbol: optimizer}
 online_buffers = {}        # {symbol: PrioritizedReplayBuffer}
 market_state = {}          # {symbol: DataFrame}
-prev_actions = {}          # {symbol: action_idx} — track position changes
+prev_actions = {}          # {symbol: action_idx}
+
+# Position tracking (mirrors TradingEnv state for trade_state input)
+live_positions = {}        # {symbol: {'pos': 0.0, 'entry_price': 0.0, 'bars_held': 0}}
+
 
 def load_models():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Loading models on {device}...")
-    
+
     for symbol in Settings.PAIRS:
-        model_path = f"models/{symbol}_brain.pth"
-        if not os.path.exists(model_path):
-            logger.error(f"Model not found for {symbol} at {model_path}. Skipping.")
+        # Try multiple model path formats
+        candidates = [
+            f"models/best_{symbol}.pt",
+            f"models/{symbol}_brain.pth",
+            f"models/{symbol}_brain_live.pth",
+        ]
+
+        model_path = None
+        for path in candidates:
+            if os.path.exists(path):
+                model_path = path
+                break
+
+        if model_path is None:
+            logger.error(f"Model not found for {symbol}. Tried: {candidates}. Skipping.")
             continue
-            
+
         model = QNetwork().to(device)
         try:
-            model.load_state_dict(torch.load(model_path, map_location=device))
+            state_dict = torch.load(model_path, map_location=device, weights_only=True)
+            model.load_state_dict(state_dict)
             model.eval()
             active_models[symbol] = model
-            
-            # P0: Initialize online learning components
+
+            # Initialize online learning components
             online_optimizers[symbol] = optim.Adam(
                 model.parameters(), lr=Settings.ONLINE_LR
             )
             online_buffers[symbol] = PrioritizedReplayBuffer(
                 capacity=Settings.ONLINE_BUFFER_SIZE, alpha=Settings.PER_ALPHA
             )
-            prev_actions[symbol] = 3  # Start with HOLD
-            
-            logger.info(f"Loaded model for {symbol} (online learning enabled)")
+            prev_actions[symbol] = ACT_HOLD
+            live_positions[symbol] = {'pos': 0.0, 'entry_price': 0.0, 'bars_held': 0}
+
+            total_params = sum(p.numel() for p in model.parameters())
+            logger.info(f"Loaded model for {symbol} from {model_path} ({total_params:,} params)")
         except Exception as e:
             logger.error(f"Failed to load model for {symbol}: {e}")
+
 
 def init_market_state():
     logger.info("Initializing market state...")
@@ -69,111 +93,115 @@ def init_market_state():
         df = data_factory.fetch_data(symbol, Settings.INIT_DATA_BARS)
         if not df.empty:
             market_state[symbol] = df
-            logger.info(f"Initialized state for {symbol} with {len(df)} bars")
+            logger.info(f"  {symbol}: {len(df)} bars loaded (to {df.index[-1]})")
         else:
-            logger.error(f"Failed to fetch init data for {symbol}")
+            logger.error(f"  {symbol}: Failed to get initial data.")
+
 
 def update_market_state():
+    """Fetch latest bars and append to market_state."""
     def process_symbol(symbol):
         try:
-            if symbol not in market_state:
-                return
-            new_data = data_factory.fetch_data(symbol, 2)
-            if new_data.empty:
-                return
-            current_df = market_state[symbol]
-            mask = ~current_df.index.isin(new_data.index)
-            combined = pd.concat([current_df[mask], new_data])
-            if len(combined) > Settings.INIT_DATA_BARS + 50:
-                combined = combined.iloc[-Settings.INIT_DATA_BARS:]
-            market_state[symbol] = combined
+            df_new = data_factory.fetch_data(symbol, 10)
+            if not df_new.empty and symbol in market_state:
+                df_old = market_state[symbol]
+                combined = pd.concat([df_old, df_new])
+                combined = combined[~combined.index.duplicated(keep='last')]
+                combined = combined.sort_index()
+                # Keep only what we need
+                max_keep = Settings.SEQUENCE_LENGTH * 4 + 100
+                if len(combined) > max_keep:
+                    combined = combined.iloc[-max_keep:]
+                market_state[symbol] = combined
         except Exception as e:
             logger.error(f"Error updating state for {symbol}: {e}")
 
     with ThreadPoolExecutor() as executor:
         executor.map(process_symbol, Settings.PAIRS)
 
-def online_learn(symbol, state, action_idx, reward, next_state):
-    """
-    P0: Online Gradient Descent — adapt model to live market.
-    Small buffer + few gradient steps with tiny LR.
-    """
-    if symbol not in online_buffers or symbol not in active_models:
-        return
-    
-    buffer = online_buffers[symbol]
-    model = active_models[symbol]
-    optimizer = online_optimizers[symbol]
-    device = next(model.parameters()).device
-    
-    # Store experience
-    buffer.push(state, action_idx, reward, next_state, False)
-    
-    if len(buffer) < 32:
-        return
-    
-    # Mini-batch gradient steps
-    model.train()
-    loss_fn = nn.MSELoss(reduction='none')
-    action_map = torch.tensor(Settings.ACTION_MAP, device=device)
-    
-    for _ in range(Settings.ONLINE_UPDATE_STEPS):
-        states, actions, rewards, next_states, _, idxs, is_weights = buffer.sample(32, beta=0.6)
-        
-        st = torch.FloatTensor(states).to(device)
-        nst = torch.FloatTensor(next_states).to(device)
-        at = torch.LongTensor(actions).to(device)
-        rt = torch.FloatTensor(rewards).to(device)
-        wt = torch.FloatTensor(is_weights).to(device)
-        
-        current_q = model(st).gather(1, at.unsqueeze(1)).squeeze(1)
-        with torch.no_grad():
-            next_q = model(nst).max(1)[0]
-            target_q = rt + Settings.GAMMA * next_q
-        
-        loss = (loss_fn(current_q, target_q) * wt).mean()
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-        optimizer.step()
-        
-        td_errors = torch.abs(target_q - current_q).detach().cpu().numpy()
-        buffer.update_priorities(idxs, td_errors)
-    
-    model.eval()
+
+def get_trade_state(symbol):
+    """Build trade_state vector matching the training environment."""
+    pos_info = live_positions.get(symbol, {'pos': 0.0, 'entry_price': 0.0, 'bars_held': 0})
+
+    # Check actual MT5 position to stay in sync
+    positions = mt5.positions_get(symbol=symbol)
+    if positions and len(positions) > 0:
+        mt5_pos = positions[0]
+        # Sync direction from MT5
+        if mt5_pos.type == 0:  # BUY
+            pos_info['pos'] = 1.0
+        elif mt5_pos.type == 1:  # SELL
+            pos_info['pos'] = -1.0
+        if pos_info['entry_price'] == 0.0:
+            pos_info['entry_price'] = mt5_pos.price_open
+    elif pos_info['pos'] != 0.0:
+        # MT5 says no position but we think we have one: reset
+        pos_info['pos'] = 0.0
+        pos_info['entry_price'] = 0.0
+        pos_info['bars_held'] = 0
+
+    live_positions[symbol] = pos_info
+
+    # Compute unrealized PnL
+    profile = Settings.PAIR_CONFIGS.get(symbol, {})
+    sf = profile.get('scaling_factor', 10000.0)
+    upnl = 0.0
+    if pos_info['pos'] != 0 and pos_info['entry_price'] > 0:
+        tick = mt5.symbol_info_tick(symbol)
+        if tick:
+            current_price = (tick.bid + tick.ask) / 2.0
+            upnl = pos_info['pos'] * (current_price - pos_info['entry_price']) * sf
+
+    trade_state = np.array([
+        pos_info['pos'],
+        min(pos_info['bars_held'] / 48.0, 1.0),
+        np.clip(upnl / 100.0, -1, 1)
+    ], dtype=np.float32)
+
+    return trade_state
+
 
 def get_signal(symbol):
-    """Returns: (action_idx, position_fraction, df_features)"""
+    """Returns: (action_idx, df_features)"""
     if symbol not in active_models or symbol not in market_state:
-        return 3, 0.0, None
-        
+        return ACT_HOLD, None
+
     df = market_state[symbol]
-    df_features = data_factory.prepare_features(df)
-    
+
+    # Resample M5 -> M15 and compute features
+    df_m15 = data_factory.resample_ohlcv(df, rule='15min')
+    df_features = data_factory.prepare_features(df_m15)
+
     if len(df_features) < Settings.SEQUENCE_LENGTH:
         logger.warning(f"Not enough data for {symbol} inference.")
-        return 3, 0.0, df_features
-        
+        return ACT_HOLD, df_features
+
+    # Market state tensor
     seq_window = df_features[Settings.FEATURES].iloc[-Settings.SEQUENCE_LENGTH:].values
     device = next(active_models[symbol].parameters()).device
-    seq_tensor = torch.FloatTensor(seq_window).unsqueeze(0).to(device)
-    
+    mkt_tensor = torch.FloatTensor(seq_window).unsqueeze(0).to(device)
+
+    # Trade state tensor
+    trade_state = get_trade_state(symbol)
+    ts_tensor = torch.FloatTensor(trade_state).unsqueeze(0).to(device)
+
     with torch.no_grad():
-        q_values = active_models[symbol](seq_tensor)
-        # P28: Live epsilon for exploration (Zengeler & Handmann)
+        q_values = active_models[symbol](mkt_tensor, ts_tensor)
+        # Live epsilon for exploration
         if random.random() < Settings.LIVE_EPSILON:
             action_idx = random.randint(0, Settings.OUTPUT_DIM - 1)
         else:
-            action_idx = torch.argmax(q_values).item()
-    
-    position_fraction = Settings.ACTION_MAP[action_idx]
-    return action_idx, position_fraction, df_features
+            action_idx = q_values.argmax(dim=1).item()
 
-def execute_trade(symbol, action_idx, position_fraction, df_features=None):
-    """P1: Includes Take-Profit alongside Stop-Loss."""
-    if abs(position_fraction) < 0.01:
+    return action_idx, df_features
+
+
+def execute_trade(symbol, action_idx, df_features=None):
+    """Execute semantic action: BUY, SELL, CLOSE, or HOLD (no-op)."""
+    if action_idx == ACT_HOLD:
         return
-    
+
     positions = mt5.positions_get(symbol=symbol)
     if positions is None:
         logger.error(f"Failed to get positions for {symbol}, error: {mt5.last_error()}")
@@ -194,26 +222,22 @@ def execute_trade(symbol, action_idx, position_fraction, df_features=None):
         return
     point = sym_info.point
 
-    # Spread filter (safety gate)
+    # Spread filter
     spread_points = (tick.ask - tick.bid) / point
     if spread_points > Settings.SPREAD_FILTER_POINTS:
         logger.warning(f"Spread too high ({spread_points:.0f}). Skipping.")
         return
 
-    lot_size = round(abs(position_fraction) * Settings.MAX_LOT_SIZE, 2)
-    lot_size = max(lot_size, 0.01)
+    lot_size = Settings.MAX_POSITION_SIZE
 
     # ATR for SL and TP
-    if df_features is not None and not df_features.empty and 'atr_normalized' in df_features.columns:
-        current_atr = df_features.iloc[-1]['atr_normalized'] * tick.ask
+    if df_features is not None and not df_features.empty and 'atr' in df_features.columns:
+        current_atr = df_features.iloc[-1]['atr']
     else:
         current_atr = tick.ask * 0.002
 
     sl_dist = current_atr * Settings.ATR_SL_MULTIPLIER
-    tp_dist = current_atr * Settings.ATR_TP_MULTIPLIER  # P1: Take-Profit
-
-    is_buy = position_fraction > 0
-    is_sell = position_fraction < 0
+    tp_dist = current_atr * Settings.ATR_TP_MULTIPLIER
 
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
@@ -225,13 +249,21 @@ def execute_trade(symbol, action_idx, position_fraction, df_features=None):
         "tp": 0.0,
         "deviation": 10,
         "magic": magic,
-        "comment": f"AI P27 {position_fraction:+.2f}",
+        "comment": f"AI {ACTION_NAMES[action_idx]}",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
 
-    if is_buy:
-        if pos_type == 1:
+    if action_idx == ACT_CLOSE:
+        # Close any existing position
+        if current_pos:
+            close_position(current_pos, symbol)
+            live_positions[symbol] = {'pos': 0.0, 'entry_price': 0.0, 'bars_held': 0}
+        return
+
+    if action_idx == ACT_BUY:
+        # Close short first if open
+        if pos_type == 1:  # SELL position
             close_position(current_pos, symbol)
             current_pos = None
 
@@ -239,17 +271,23 @@ def execute_trade(symbol, action_idx, position_fraction, df_features=None):
             request["type"] = mt5.ORDER_TYPE_BUY
             request["price"] = tick.ask
             request["sl"] = tick.ask - sl_dist
-            request["tp"] = tick.ask + tp_dist  # P1: TP
+            request["tp"] = tick.ask + tp_dist
             request["volume"] = lot_size
-            
+
             result = mt5.order_send(request)
             if result.retcode != mt5.TRADE_RETCODE_DONE:
                 logger.error(f"{symbol}: Buy failed: {result.comment}")
             else:
                 logger.info(f"{symbol}: BUY {lot_size} lots. SL@{request['sl']:.5f} TP@{request['tp']:.5f}")
+                live_positions[symbol] = {
+                    'pos': 1.0,
+                    'entry_price': tick.ask,
+                    'bars_held': 0
+                }
 
-    elif is_sell:
-        if pos_type == 0:
+    elif action_idx == ACT_SELL:
+        # Close long first if open
+        if pos_type == 0:  # BUY position
             close_position(current_pos, symbol)
             current_pos = None
 
@@ -257,58 +295,122 @@ def execute_trade(symbol, action_idx, position_fraction, df_features=None):
             request["type"] = mt5.ORDER_TYPE_SELL
             request["price"] = tick.bid
             request["sl"] = tick.bid + sl_dist
-            request["tp"] = tick.bid - tp_dist  # P1: TP
+            request["tp"] = tick.bid - tp_dist
             request["volume"] = lot_size
-            
+
             result = mt5.order_send(request)
             if result.retcode != mt5.TRADE_RETCODE_DONE:
                 logger.error(f"{symbol}: Sell failed: {result.comment}")
             else:
                 logger.info(f"{symbol}: SELL {lot_size} lots. SL@{request['sl']:.5f} TP@{request['tp']:.5f}")
+                live_positions[symbol] = {
+                    'pos': -1.0,
+                    'entry_price': tick.bid,
+                    'bars_held': 0
+                }
+
+
+def online_learn(symbol, state_mkt, state_ts, action_idx, reward, next_state_mkt, next_state_ts):
+    """Online gradient descent — adapt model to live market with trade_state."""
+    if symbol not in online_buffers or symbol not in active_models:
+        return
+
+    buffer = online_buffers[symbol]
+    model = active_models[symbol]
+    optimizer = online_optimizers[symbol]
+    device = next(model.parameters()).device
+
+    # Store experience as (mkt_state, trade_state) tuple
+    buffer.push((state_mkt, state_ts), action_idx, reward,
+                (next_state_mkt, next_state_ts), False)
+
+    if len(buffer) < 32:
+        return
+
+    model.train()
+    loss_fn = nn.MSELoss(reduction='none')
+
+    for _ in range(Settings.ONLINE_UPDATE_STEPS):
+        states, actions, rewards, next_states, _, idxs, is_weights = buffer.sample(32, beta=0.6)
+
+        mkt = torch.FloatTensor(np.array([s[0] for s in states])).to(device)
+        ts = torch.FloatTensor(np.array([s[1] for s in states])).to(device)
+        nmkt = torch.FloatTensor(np.array([s[0] for s in next_states])).to(device)
+        nts = torch.FloatTensor(np.array([s[1] for s in next_states])).to(device)
+        at = torch.LongTensor(actions).to(device)
+        rt = torch.FloatTensor(rewards).to(device)
+        wt = torch.FloatTensor(is_weights).to(device)
+
+        with torch.enable_grad():
+            current_q = model(mkt, ts).gather(1, at.unsqueeze(1)).squeeze(1)
+            with torch.no_grad():
+                next_q = model(nmkt, nts).max(1)[0]
+                target_q = rt + Settings.GAMMA * next_q
+
+            loss = (loss_fn(current_q, target_q) * wt).mean()
+            optimizer.zero_grad()
+            loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+        optimizer.step()
+
+        td_errors = torch.abs(target_q - current_q).detach().cpu().numpy()
+        buffer.update_priorities(idxs, td_errors)
+
+    model.eval()
+
 
 def process_pair(symbol):
     """Orchestrates signal + execution + online learning feedback."""
     try:
-        action_idx, position_fraction, df_features = get_signal(symbol)
+        action_idx, df_features = get_signal(symbol)
+        sig_str = ACTION_NAMES[action_idx]
 
-        action_labels = {0: "STRONG SELL", 1: "SELL", 2: "WEAK SELL", 
-                        3: "HOLD", 4: "WEAK BUY", 5: "BUY", 6: "STRONG BUY"}
-        sig_str = action_labels.get(action_idx, "UNKNOWN")
+        if action_idx != ACT_HOLD:
+            logger.info(f"{symbol} Signal: {sig_str}")
 
-        if action_idx != 3:
-            logger.info(f"{symbol} Signal: {sig_str} (pos={position_fraction:+.2f})")
+        execute_trade(symbol, action_idx, df_features=df_features)
 
-        execute_trade(symbol, action_idx, position_fraction, df_features=df_features)
-        
-        # P28 FIX: Online learning feedback
-        # Reward MUST match training formula: (vol_scale * position * price_change - cost).clamp(-5, 5)
+        # Online learning feedback
         if df_features is not None and len(df_features) >= Settings.SEQUENCE_LENGTH + 1:
-            prev_action = prev_actions.get(symbol, 3)
-            prev_position = Settings.ACTION_MAP[prev_action]
-            
-            if abs(prev_position) > 0.01:
+            prev_action = prev_actions.get(symbol, ACT_HOLD)
+            pos_info = live_positions.get(symbol, {'pos': 0.0, 'entry_price': 0.0, 'bars_held': 0})
+
+            if pos_info['pos'] != 0:
                 profile = Settings.PAIR_CONFIGS.get(symbol, {})
-                sf = profile.get('scaling_factor', 1.0)
-                
-                prices = df_features['mid_price'].values
+                sf = profile.get('scaling_factor', 10000.0)
+
+                prices = df_features['close'].values
                 price_change = (prices[-1] - prices[-2]) * sf
-                
-                # P30: Match training reward (simple PnL - cost, no vol scaling)
-                cost = Settings.TRANSACTION_COST_BPS * 0.0001 * sf * abs(prev_position)
-                reward = max(-10.0, min(10.0, prev_position * price_change - cost))
-                
-                # Get state sequences for online buffer
+
+                cost = Settings.TRANSACTION_COST_BPS * 0.0001 * sf
+                reward = np.clip(pos_info['pos'] * price_change - cost, -10.0, 10.0)
+
+                # Build state sequences for online buffer
                 features = df_features[Settings.FEATURES].values
-                state = features[-Settings.SEQUENCE_LENGTH - 1 : -1]
-                next_state = features[-Settings.SEQUENCE_LENGTH:]
-                
-                if len(state) == Settings.SEQUENCE_LENGTH and len(next_state) == Settings.SEQUENCE_LENGTH:
-                    online_learn(symbol, state, prev_action, reward, next_state)
-            
+                state_mkt = features[-Settings.SEQUENCE_LENGTH - 1: -1]
+                next_state_mkt = features[-Settings.SEQUENCE_LENGTH:]
+
+                trade_state = get_trade_state(symbol)
+                # Approximate prev trade state
+                prev_trade_state = trade_state.copy()
+
+                if (len(state_mkt) == Settings.SEQUENCE_LENGTH and
+                        len(next_state_mkt) == Settings.SEQUENCE_LENGTH):
+                    online_learn(symbol, state_mkt, prev_trade_state,
+                                 prev_action, reward, next_state_mkt, trade_state)
+
             prev_actions[symbol] = action_idx
-            
+
+            # Update bars_held for position tracking
+            if pos_info['pos'] != 0:
+                pos_info['bars_held'] += 1
+                live_positions[symbol] = pos_info
+
     except Exception as e:
         logger.error(f"Error processing {symbol}: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 def close_position(position, symbol):
     tick = mt5.symbol_info_tick(symbol)
@@ -332,6 +434,8 @@ def close_position(position, symbol):
         logger.error(f"{symbol}: Close failed: {result.comment}")
     else:
         logger.info(f"{symbol}: Position closed. PnL: {result.profit}")
+        live_positions[symbol] = {'pos': 0.0, 'entry_price': 0.0, 'bars_held': 0}
+
 
 # --- Main Daemon ---
 if __name__ == "__main__":
@@ -343,39 +447,38 @@ if __name__ == "__main__":
     ):
         logger.error(f"MT5 init failed.")
         exit()
-        
-    logger.info("Starting Multi-Pair Bot (Phase 27)...")
+
+    logger.info("Starting Live Bot...")
     load_models()
     init_market_state()
-    
+
     logger.info("Bot Running. Monitoring market...")
-    
+
     try:
         while True:
             time.sleep(1)
             now = datetime.now()
             pass_check = (now.minute % 5 == 0) and (now.second < 2)
-            
+
             if pass_check:
                 logger.info(f"New Candle: {now.strftime('%H:%M:%S')}")
                 update_market_state()
-                
+
                 with ThreadPoolExecutor() as executor:
                     list(executor.map(process_pair, Settings.PAIRS))
-                
-                # Periodically save online-updated models (every hour)
+
+                # Save online-updated models hourly
                 if now.minute == 0:
                     for sym, model in active_models.items():
                         backup_path = f"models/{sym}_brain_live.pth"
                         torch.save(model.state_dict(), backup_path)
                         logger.info(f"Saved online model checkpoint: {backup_path}")
-                
+
                 while datetime.now().second < 2:
                     time.sleep(0.5)
-                
+
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
-        # Save final online-updated models
         for sym, model in active_models.items():
             torch.save(model.state_dict(), f"models/{sym}_brain_live.pth")
             logger.info(f"Saved final online model: {sym}")
