@@ -54,6 +54,18 @@ FEATURES = [
 
 
 # ================================================================
+# RESAMPLING
+# ================================================================
+
+def resample_ohlcv(df: pd.DataFrame, rule: str = '15min') -> pd.DataFrame:
+    """Resample M5 OHLCV data to a higher timeframe (e.g. M15)."""
+    agg = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}
+    if 'tick_volume' in df.columns:
+        agg['tick_volume'] = 'sum'
+    return df.resample(rule).agg(agg).dropna()
+
+
+# ================================================================
 # DATA FETCHING
 # ================================================================
 

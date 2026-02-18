@@ -36,3 +36,4 @@ config.py
 *.csv
 tests/data/
 /cache/
+backtest_EURUSD.png
