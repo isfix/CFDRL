@@ -109,7 +109,7 @@ def update_market_state():
                 combined = combined[~combined.index.duplicated(keep='last')]
                 combined = combined.sort_index()
                 # Keep only what we need
-                max_keep = Settings.SEQUENCE_LENGTH * 4 + 100
+                max_keep = Settings.INIT_DATA_BARS + 100
                 if len(combined) > max_keep:
                     combined = combined.iloc[-max_keep:]
                 market_state[symbol] = combined
@@ -433,7 +433,7 @@ def close_position(position, symbol):
     if result.retcode != mt5.TRADE_RETCODE_DONE:
         logger.error(f"{symbol}: Close failed: {result.comment}")
     else:
-        logger.info(f"{symbol}: Position closed. PnL: {result.profit}")
+        logger.info(f"{symbol}: Position closed. {result.comment}")
         live_positions[symbol] = {'pos': 0.0, 'entry_price': 0.0, 'bars_held': 0}
 
 
