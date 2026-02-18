@@ -144,27 +144,48 @@ class Backtester:
         axes[1].grid(alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(f"backtest_{self.symbol}.png", dpi=150)
+        suffix = '_oos' if hasattr(self, '_oos') and self._oos else ''
+        fname = f"backtest_{self.symbol}{suffix}.png"
+        plt.savefig(fname, dpi=150)
         plt.show()
-        print(f"Chart saved: backtest_{self.symbol}.png")
+        print(f"Chart saved: {fname}")
 
 
-def run_backtest(symbol):
+def run_backtest(symbol, oos=False, train_bars=400000):
     tester = Backtester(symbol)
+    tester._oos = oos
     tester.load_model()
 
     pair_cfg = Settings.PAIR_CONFIGS.get(symbol, Settings.PAIR_CONFIGS['EURUSD'])
     SF = pair_cfg['scaling_factor']
 
-    # Fetch data from MT5
-    df = data_factory.fetch_data(symbol, Settings.TRAIN_DATA_BARS)
-    if df.empty:
-        print("Failed to fetch data.")
-        return
+    if oos:
+        # Out-of-sample: fetch 2x the training bars, test on the OLDER half
+        total_fetch = train_bars * 2
+        print(f"\n=== OUT-OF-SAMPLE MODE ===")
+        print(f"Fetching {total_fetch} M5 bars (training used latest {train_bars})")
+        df = data_factory.fetch_data(symbol, total_fetch)
+        if df.empty:
+            print("Failed to fetch data.")
+            return
+        # The model was trained on the LATEST train_bars, so use everything BEFORE that
+        cutoff = len(df) - train_bars
+        if cutoff <= 0:
+            print(f"Not enough data: got {len(df)} bars, need >{train_bars}")
+            return
+        df_test_raw = df.iloc[:cutoff].copy()
+        print(f"OOS test data: {len(df_test_raw)} M5 bars")
+        print(f"  OOS Period: {df_test_raw.index[0]} to {df_test_raw.index[-1]}")
+        print(f"  (Training data starts at: {df.index[cutoff]})")
+    else:
+        # Default: fetch and use last 20% as test (in-sample validation)
+        df = data_factory.fetch_data(symbol, Settings.TRAIN_DATA_BARS)
+        if df.empty:
+            print("Failed to fetch data.")
+            return
+        test_start_idx = int(len(df) * 0.8)
+        df_test_raw = df.iloc[test_start_idx:].copy()
 
-    # Use last 20% as test data
-    test_start_idx = int(len(df) * 0.8)
-    df_test_raw = df.iloc[test_start_idx:].copy()
     print(f"Raw test data: {len(df_test_raw)} M5 bars from {df_test_raw.index[0]} to {df_test_raw.index[-1]}")
 
     # Resample M5 -> M15 and compute features
@@ -425,6 +446,14 @@ def run_backtest(symbol):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Backtest trading model")
+    parser.add_argument("--pair", type=str, default=None, help="Symbol to backtest")
+    parser.add_argument("--oos", action="store_true", help="Out-of-sample: test on data BEFORE training window")
+    parser.add_argument("--train-bars", type=int, default=400000, help="Number of M5 bars used for training")
+    args = parser.parse_args()
+
     if not mt5.initialize(
         path=Settings.MT5_PATH,
         login=Settings.MT5_LOGIN,
@@ -434,15 +463,18 @@ if __name__ == "__main__":
         logger.error(f"MT5 init failed.")
         exit()
 
-    print(f"Available pairs: {Settings.PAIRS}")
-    user_symbol = input(f"Enter symbol to backtest (Default: EURUSD): ").strip().upper() or "EURUSD"
+    if args.pair:
+        user_symbol = args.pair.upper()
+    else:
+        print(f"Available pairs: {Settings.PAIRS}")
+        user_symbol = input(f"Enter symbol to backtest (Default: EURUSD): ").strip().upper() or "EURUSD"
 
     if user_symbol not in Settings.PAIR_CONFIGS:
         print(f"Symbol {user_symbol} not configured!")
         exit()
 
     try:
-        run_backtest(user_symbol)
+        run_backtest(user_symbol, oos=args.oos, train_bars=args.train_bars)
     except KeyboardInterrupt:
         print("\nBacktest interrupted.")
     finally:
