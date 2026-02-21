@@ -17,6 +17,7 @@ import os
 import sys
 import copy
 import random
+import gc
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -467,12 +468,19 @@ if __name__ == "__main__":
                 with ThreadPoolExecutor() as executor:
                     list(executor.map(process_pair, Settings.PAIRS))
 
-                # Save online-updated models hourly
+                # Save online-updated models hourly & garbage collect
                 if now.minute == 0:
                     for sym, model in active_models.items():
                         backup_path = f"models/{sym}_brain_live.pth"
                         torch.save(model.state_dict(), backup_path)
                         logger.info(f"Saved online model checkpoint: {backup_path}")
+                    gc.collect()
+                    try:
+                        import psutil
+                        rss = psutil.Process().memory_info().rss / 1024 / 1024
+                        logger.info(f"Memory: {rss:.0f} MB")
+                    except ImportError:
+                        pass
 
                 while datetime.now().second < 2:
                     time.sleep(0.5)

@@ -145,21 +145,33 @@ class Backtester:
 
         plt.tight_layout()
         suffix = '_oos' if hasattr(self, '_oos') and self._oos else ''
+        if hasattr(self, '_days') and self._days:
+            suffix = f'_{self._days}d'
         fname = f"backtest_{self.symbol}{suffix}.png"
         plt.savefig(fname, dpi=150)
         plt.show()
         print(f"Chart saved: {fname}")
 
 
-def run_backtest(symbol, oos=False, train_bars=400000):
+def run_backtest(symbol, oos=False, train_bars=400000, days=None):
     tester = Backtester(symbol)
     tester._oos = oos
+    tester._days = days
     tester.load_model()
 
     pair_cfg = Settings.PAIR_CONFIGS.get(symbol, Settings.PAIR_CONFIGS['EURUSD'])
     SF = pair_cfg['scaling_factor']
 
-    if oos:
+    if days:
+        # Last N days mode: fetch exactly N days of M5 data
+        bars_needed = days * 24 * 12  # M5 bars per day
+        print(f"\n=== LAST {days} DAYS MODE ===")
+        df = data_factory.fetch_data(symbol, bars_needed)
+        if df.empty:
+            print("Failed to fetch data.")
+            return
+        df_test_raw = df.copy()
+    elif oos:
         # Out-of-sample: fetch 2x the training bars, test on the OLDER half
         total_fetch = train_bars * 2
         print(f"\n=== OUT-OF-SAMPLE MODE ===")
@@ -447,11 +459,14 @@ def run_backtest(symbol, oos=False, train_bars=400000):
 
 if __name__ == "__main__":
     import argparse
+    import glob
 
     parser = argparse.ArgumentParser(description="Backtest trading model")
     parser.add_argument("--pair", type=str, default=None, help="Symbol to backtest")
     parser.add_argument("--oos", action="store_true", help="Out-of-sample: test on data BEFORE training window")
     parser.add_argument("--train-bars", type=int, default=400000, help="Number of M5 bars used for training")
+    parser.add_argument("--days", type=int, default=None, help="Backtest on last N days of data")
+    parser.add_argument("--all", action="store_true", help="Backtest all available models")
     args = parser.parse_args()
 
     if not mt5.initialize(
@@ -463,19 +478,37 @@ if __name__ == "__main__":
         logger.error(f"MT5 init failed.")
         exit()
 
-    if args.pair:
-        user_symbol = args.pair.upper()
+    if args.all:
+        # Auto-discover all models
+        model_files = glob.glob("models/best_*.pt")
+        symbols = [os.path.basename(f).replace('best_', '').replace('.pt', '') for f in model_files]
+        symbols = [s for s in symbols if s in Settings.PAIR_CONFIGS]
+        if not symbols:
+            print("No models found in models/best_*.pt")
+            exit()
+        print(f"Found {len(symbols)} models: {symbols}")
+        for sym in symbols:
+            print(f"\n{'='*60}")
+            print(f"  BACKTESTING: {sym}")
+            print(f"{'='*60}")
+            try:
+                run_backtest(sym, oos=args.oos, train_bars=args.train_bars, days=args.days)
+            except Exception as e:
+                print(f"ERROR backtesting {sym}: {e}")
     else:
-        print(f"Available pairs: {Settings.PAIRS}")
-        user_symbol = input(f"Enter symbol to backtest (Default: EURUSD): ").strip().upper() or "EURUSD"
+        if args.pair:
+            user_symbol = args.pair.upper()
+        else:
+            print(f"Available pairs: {Settings.PAIRS}")
+            user_symbol = input(f"Enter symbol to backtest (Default: EURUSD): ").strip().upper() or "EURUSD"
 
-    if user_symbol not in Settings.PAIR_CONFIGS:
-        print(f"Symbol {user_symbol} not configured!")
-        exit()
+        if user_symbol not in Settings.PAIR_CONFIGS:
+            print(f"Symbol {user_symbol} not configured!")
+            exit()
 
-    try:
-        run_backtest(user_symbol, oos=args.oos, train_bars=args.train_bars)
-    except KeyboardInterrupt:
-        print("\nBacktest interrupted.")
-    finally:
-        mt5.shutdown()
+        try:
+            run_backtest(user_symbol, oos=args.oos, train_bars=args.train_bars, days=args.days)
+        except KeyboardInterrupt:
+            print("\nBacktest interrupted.")
+
+    mt5.shutdown()

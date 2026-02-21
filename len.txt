@@ -1,0 +1,5 @@
+GBPJPY -
+GBPUSD -+
+EURUSD +
+NAS100 +
+USDJPY -++
